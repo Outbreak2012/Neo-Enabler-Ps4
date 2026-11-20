@@ -1,0 +1,15 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# User backups and demo generated files
+backups/
+demo_sfo/
+*.bak
+
+# Build artifacts for GoldHEN plugin
+goldhen_plugin/*.o
+goldhen_plugin/*.elf
+goldhen_plugin/*.oelf
+goldhen_plugin/*.prx

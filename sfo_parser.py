@@ -20,6 +20,9 @@ FMT_INT32 = 0x0404         # 32-bit unsigned integer (little-endian)
 # Bit 23 in ATTRIBUTE: "The application supports NEO mode (for PlayStation(R)4 Pro)"
 NEO_MODE_BIT = 0x00800000
 
+# Bit 16 in ATTRIBUTE: "CPU Mode (7 CPU cores unlocked for application)"
+SEVEN_CPU_CORES_BIT = 0x00010000
+
 # Other known PS4 ATTRIBUTE flags for diagnostics / reference
 KNOWN_ATTRIBUTE_BITS: Dict[int, str] = {
     0x00000001: "Initial User Logout Aware",
@@ -234,11 +237,17 @@ class SfoFile:
     def is_neo_enabled(self) -> bool:
         return bool(self.attribute & NEO_MODE_BIT)
 
-    def set_neo_mode(self, enabled: bool) -> int:
-        """Sets or clears the Neo Mode flag (0x00800000) in ATTRIBUTE and returns the new ATTRIBUTE value."""
+    @property
+    def is_7cpu_enabled(self) -> bool:
+        return bool(self.attribute & SEVEN_CPU_CORES_BIT)
+
+    def set_neo_mode(self, enabled: bool, unlock_7cpu: bool = False) -> int:
+        """Sets or clears the Neo Mode flag (0x00800000) and optionally 7-CPU-Core bit (0x00010000) in ATTRIBUTE."""
         current = self.attribute
         if enabled:
             new_val = current | NEO_MODE_BIT
+            if unlock_7cpu:
+                new_val |= SEVEN_CPU_CORES_BIT
         else:
             new_val = current & ~NEO_MODE_BIT
         self.attribute = new_val

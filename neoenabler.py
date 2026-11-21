@@ -27,8 +27,12 @@ from resolution_patcher import (
     SOURCE_RESOLUTIONS,
     TARGET_RESOLUTIONS,
     FramerateMatch,
+    LiveAnalyzedCandidate,
     ResolutionMatch,
+    analyze_eboot_realtime,
+    apply_live_candidates_to_eboot,
     build_goldhen_xml,
+    build_xml_from_live_candidates,
     generate_framerate_patch_entry,
     generate_resolution_patch_entries,
     patch_eboot_framerate_inplace,
@@ -311,7 +315,7 @@ class NeoEnablerApp:
 
         self.btn_res_enhancer = ttk.Button(
             filter_panel,
-            text="🖥️ Mejorar Resolución / 60 FPS (XML)",
+            text="⚡ Generador de Parches en Tiempo Real (Res/60FPS)",
             style="Purple.TButton",
             command=self._on_open_resolution_window,
         )
@@ -561,15 +565,21 @@ class NeoEnablerApp:
         self._set_inspector_text("\n".join(lines))
 
     def _on_open_resolution_window(self) -> None:
-        """Opens the Resolution & 60 FPS Patch Generator / Deployer dialog for the selected game."""
+        """
+        Opens the Real-Time Live Binary Patch Generator for the selected game.
+        Automatically fetches the game's eboot.bin (from local disk or live via GoldHEN FTP /mnt/sandbox/pfsmnt),
+        disassembles/scans x86_64 instructions in real-time to detect ANY native resolution (720p/792p/800p/900p/1080p),
+        30 FPS FlipRate locks (sceVideoOutSetFlipRate), and 30 FPS Fixed DeltaTime floats (1/30s -> 1/60s),
+        allowing the user to select/toggle individual offsets and build a custom patch on the spot!
+        """
         selected = self._get_selected_games()
         if not selected:
             return
         game = selected[0]
 
         win = tk.Toplevel(self.root)
-        win.title(f"🖥️ Escalador de Resolución & 60 FPS — {game.title} ({game.title_id})")
-        win.geometry("760x620")
+        win.title(f"⚡ Generador de Parches en Tiempo Real — {game.title} ({game.title_id})")
+        win.geometry("940x720")
         win.configure(bg=BG_DARK)
         win.transient(self.root)
         win.grab_set()
@@ -579,73 +589,98 @@ class NeoEnablerApp:
 
         ttk.Label(
             panel,
-            text=f"🖥️ Mejora de Resolución y Framerate para {game.title} ({game.title_id})",
+            text=f"⚡ Generador de Parches en Tiempo Real — {game.title} ({game.title_id} v{game.app_ver})",
             style="Header.TLabel",
-        ).pack(anchor=tk.W, pady=(0, 6))
+        ).pack(anchor=tk.W, pady=(0, 4))
 
-        curated_list = CURATED_GAME_PATCHES.get(game.title_id.upper(), [])
-        if curated_list:
-            cur_text = "✨ Este título tiene parches verificados en la base de datos: " + ", ".join(
-                c.name for c in curated_list
-            )
-        else:
-            cur_text = (
-                "🔍 Este título usará el Escáner Heurístico de eboot.bin para localizar y escalar el framebuffer."
-            )
-        ttk.Label(panel, text=cur_text, style="SubHeader.TLabel", wraplength=710).pack(anchor=tk.W, pady=(0, 10))
+        status_lbl_var = tk.StringVar(
+            value="Analizando ejecutable (eboot.bin) en tiempo real sin depender de bases de datos externas..."
+        )
+        ttk.Label(panel, textvariable=status_lbl_var, style="SubHeader.TLabel", wraplength=890).pack(
+            anchor=tk.W, pady=(0, 10)
+        )
 
-        # Controls frame
+        # Controls Bar
         ctrl_frame = ttk.Frame(panel, style="Card.TFrame", padding=10)
         ctrl_frame.pack(fill=tk.X, pady=(0, 10))
 
         row1 = ttk.Frame(ctrl_frame, style="Card.TFrame")
         row1.pack(fill=tk.X, pady=(0, 8))
 
-        ttk.Label(row1, text="Resolución Base Original:", background=BG_CARD, foreground=FG_PRIMARY).pack(
+        ttk.Label(row1, text="Detección Resolución Base:", background=BG_CARD, foreground=FG_PRIMARY).pack(
             side=tk.LEFT, padx=(0, 6)
         )
-        src_res_var = tk.StringVar(value="900p (1600x900)")
-        src_combo = ttk.Combobox(row1, textvariable=src_res_var, values=list(SOURCE_RESOLUTIONS.keys()), width=24, state="readonly")
+        auto_src_options = ["🔍 AUTO-DETECTAR TODAS (720p/792p/800p/900p/1080p)"] + list(SOURCE_RESOLUTIONS.keys())
+        src_res_var = tk.StringVar(value=auto_src_options[0])
+        src_combo = ttk.Combobox(row1, textvariable=src_res_var, values=auto_src_options, width=42, state="readonly")
         src_combo.pack(side=tk.LEFT, padx=(0, 14))
 
-        ttk.Label(row1, text="Nueva Resolución (Modo Neo):", background=BG_CARD, foreground="#3fb950").pack(
+        ttk.Label(row1, text="Escalar a (Modo Neo):", background=BG_CARD, foreground="#3fb950").pack(
             side=tk.LEFT, padx=(0, 6)
         )
         tgt_res_var = tk.StringVar(value="1440p QHD 2K (2560x1440)")
-        tgt_combo = ttk.Combobox(row1, textvariable=tgt_res_var, values=list(TARGET_RESOLUTIONS.keys()), width=26, state="readonly")
+        tgt_combo = ttk.Combobox(
+            row1, textvariable=tgt_res_var, values=list(TARGET_RESOLUTIONS.keys()), width=25, state="readonly"
+        )
         tgt_combo.pack(side=tk.LEFT)
 
         row2 = ttk.Frame(ctrl_frame, style="Card.TFrame")
         row2.pack(fill=tk.X)
 
-        unlock_60fps_var = tk.BooleanVar(value=True)
-        include_curated_var = tk.BooleanVar(value=True)
+        include_curated_var = tk.BooleanVar(value=game.title_id.upper() in CURATED_GAME_PATCHES)
         patch_eboot_direct_var = tk.BooleanVar(value=False)
 
         ttk.Checkbutton(
             row2,
-            text="⚡ Liberar Framerate (60 FPS FlipRate Unlocker)",
-            variable=unlock_60fps_var,
-            command=lambda: refresh_preview(),
-        ).pack(side=tk.LEFT, padx=(0, 12))
-
-        ttk.Checkbutton(
-            row2,
-            text="Incluir perfil verificado",
+            text="Añadir también parches comunitarios si existen",
             variable=include_curated_var,
-            command=lambda: refresh_preview(),
-        ).pack(side=tk.LEFT, padx=(0, 12))
+            command=lambda: rebuild_xml_preview(),
+        ).pack(side=tk.LEFT, padx=(0, 16))
 
         ttk.Checkbutton(
             row2,
-            text="Parchear también eboot.bin directo",
+            text="Inyectar directamente en eboot.bin además del XML de GoldHEN",
             variable=patch_eboot_direct_var,
         ).pack(side=tk.LEFT)
+
+        # Live Discovered Offsets Table (with interactive toggle on click/double-click)
+        ttk.Label(
+            panel,
+            text="🧬 Instrucciones y Constantes descubiertas en vivo en el eboot.bin (Doble clic para Activar/Desactivar cada offset):",
+            style="Panel.TLabel",
+        ).pack(anchor=tk.W, pady=(0, 4))
+
+        cand_frame = ttk.Frame(panel, style="Panel.TFrame")
+        cand_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+        cols = ("enabled", "category", "vaddr", "orig", "target", "description")
+        cand_tree = ttk.Treeview(cand_frame, columns=cols, show="headings", height=7, selectmode="browse")
+        cand_tree.heading("enabled", text="Incluir")
+        cand_tree.heading("category", text="Categoría")
+        cand_tree.heading("vaddr", text="Dirección RAM (VAddr)")
+        cand_tree.heading("orig", text="Valor Original")
+        cand_tree.heading("target", text="Nuevo Valor (Parche)")
+        cand_tree.heading("description", text="Instrucción x86_64 Detectada")
+
+        cand_tree.column("enabled", width=65, anchor=tk.CENTER)
+        cand_tree.column("category", width=135, anchor=tk.CENTER)
+        cand_tree.column("vaddr", width=130, anchor=tk.CENTER)
+        cand_tree.column("orig", width=125, anchor=tk.CENTER)
+        cand_tree.column("target", width=125, anchor=tk.CENTER)
+        cand_tree.column("description", width=310, anchor=tk.W)
+
+        cand_tree.tag_configure("on", foreground="#3fb950")
+        cand_tree.tag_configure("off", foreground="#8b949e")
+
+        cand_vsb = ttk.Scrollbar(cand_frame, orient="vertical", command=cand_tree.yview)
+        cand_tree.configure(yscrollcommand=cand_vsb.set)
+        cand_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cand_vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
         # XML Preview Box
         ttk.Label(
             panel,
-            text="📄 Vista previa del Parche XML para GoldHEN (/data/GoldHEN/patches/xml/):",
+            text="📄 Código XML Generado en Tiempo Real (/data/GoldHEN/patches/xml/):",
             style="Panel.TLabel",
         ).pack(anchor=tk.W, pady=(0, 4))
 
@@ -654,93 +689,138 @@ class NeoEnablerApp:
             bg=BG_CARD,
             fg="#79c0ff",
             font=("Consolas", 9),
-            height=16,
+            height=10,
             relief=tk.FLAT,
             padx=8,
             pady=8,
         )
         xml_preview.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
-        discovered_matches: List[ResolutionMatch] = []
-        discovered_fps_matches: List[FramerateMatch] = []
+        live_candidates: List[LiveAnalyzedCandidate] = []
+        candidate_enabled: List[bool] = []
+        current_eboot_bytes: Optional[bytes] = None
 
-        def refresh_preview() -> None:
-            nonlocal discovered_matches, discovered_fps_matches
-            discovered_matches = []
-            discovered_fps_matches = []
-            src_w, src_h = SOURCE_RESOLUTIONS.get(src_res_var.get(), (1600, 900))
-            tgt_w, tgt_h = TARGET_RESOLUTIONS.get(tgt_res_var.get(), (2560, 1440))
+        def rebuild_cand_table() -> None:
+            cand_tree.delete(*cand_tree.get_children())
+            for idx, c in enumerate(live_candidates):
+                is_on = candidate_enabled[idx]
+                chk = "✅ SÍ" if is_on else "⬜ NO"
+                vaddr_str = f"0x{c.vaddr:08X}" + (f" / 0x{c.extra_vaddr:08X}" if c.extra_vaddr else "")
+                tgt_str = c.target_value_str + (f" / {c.extra_target_str}" if c.extra_target_str else "")
+                cand_tree.insert(
+                    "",
+                    tk.END,
+                    iid=str(idx),
+                    values=(chk, c.category, vaddr_str, c.original_value_str, tgt_str, c.description),
+                    tags=("on" if is_on else "off",),
+                )
 
-            # Scan eboot.bin if available locally
-            if game.local_eboot_path and Path(game.local_eboot_path).exists():
-                raw_eb = Path(game.local_eboot_path).read_bytes()
-                discovered_matches = scan_eboot_for_resolutions(raw_eb, src_w, src_h)
-                if unlock_60fps_var.get():
-                    discovered_fps_matches = scan_eboot_for_framerate_lock(raw_eb)
-
-            entries = generate_resolution_patch_entries(
+        def rebuild_xml_preview() -> None:
+            active_cands = [c for idx, c in enumerate(live_candidates) if candidate_enabled[idx]]
+            xml_str = build_xml_from_live_candidates(
                 title_id=game.title_id,
                 title=game.title,
                 app_ver=game.app_ver,
-                matches=discovered_matches,
-                target_width=tgt_w,
-                target_height=tgt_h,
+                selected_candidates=active_cands,
                 include_curated=include_curated_var.get(),
             )
-            if unlock_60fps_var.get() and discovered_fps_matches:
-                fps_entry = generate_framerate_patch_entry(
-                    title=game.title,
-                    app_ver=game.app_ver,
-                    fps_matches=discovered_fps_matches,
-                )
-                if fps_entry is not None:
-                    entries.append(fps_entry)
-
-            xml_str = build_goldhen_xml(game.title_id, entries)
             xml_preview.delete("1.0", tk.END)
             xml_preview.insert(tk.END, xml_str)
 
-        src_combo.bind("<<ComboboxSelected>>", lambda _e: refresh_preview())
-        tgt_combo.bind("<<ComboboxSelected>>", lambda _e: refresh_preview())
+        def on_toggle_candidate(_event: Optional[tk.Event] = None) -> None:
+            sel = cand_tree.selection()
+            if not sel:
+                return
+            idx = int(sel[0])
+            candidate_enabled[idx] = not candidate_enabled[idx]
+            rebuild_cand_table()
+            cand_tree.selection_set(str(idx))
+            rebuild_xml_preview()
+
+        cand_tree.bind("<Double-1>", on_toggle_candidate)
+
+        def run_live_scan() -> None:
+            nonlocal live_candidates, candidate_enabled, current_eboot_bytes
+            if current_eboot_bytes is None:
+                eb_data, src_path = self.ftp_client.fetch_game_eboot_bytes(game, log_cb=self.log)
+                current_eboot_bytes = eb_data
+                if eb_data is not None:
+                    status_lbl_var.set(
+                        f"✅ eboot.bin cargado en vivo ({len(eb_data):,} bytes desde {src_path}). Analizando instrucciones x86_64..."
+                    )
+                else:
+                    status_lbl_var.set(
+                        "⚠️ No se encontró un eboot.bin montado por FTP (abre el juego en la PS4 o pulsa 'Seleccionar eboot.bin')."
+                    )
+
+            tgt_w, tgt_h = TARGET_RESOLUTIONS.get(tgt_res_var.get(), (2560, 1440))
+            src_choice = src_res_var.get()
+            src_filter = SOURCE_RESOLUTIONS.get(src_choice, None)
+
+            if current_eboot_bytes is not None:
+                live_candidates = analyze_eboot_realtime(
+                    current_eboot_bytes,
+                    target_width=tgt_w,
+                    target_height=tgt_h,
+                    source_filter=src_filter,
+                )
+                candidate_enabled = [c.enabled_by_default for c in live_candidates]
+                res_cnt = sum(1 for c in live_candidates if c.category == "Resolución")
+                fps_cnt = sum(1 for c in live_candidates if c.category == "Framerate (FlipRate)")
+                dt_cnt = sum(1 for c in live_candidates if c.category == "DeltaTime (30->60Hz)")
+                status_lbl_var.set(
+                    f"🎯 Análisis en Tiempo Real completado: {len(live_candidates)} puntos de inyección hallados "
+                    f"({res_cnt} Resolución, {fps_cnt} FlipRate 60FPS, {dt_cnt} DeltaTime 60Hz)."
+                )
+            else:
+                live_candidates = []
+                candidate_enabled = []
+
+            rebuild_cand_table()
+            rebuild_xml_preview()
+
+        src_combo.bind("<<ComboboxSelected>>", lambda _e: run_live_scan())
+        tgt_combo.bind("<<ComboboxSelected>>", lambda _e: run_live_scan())
 
         btn_row = ttk.Frame(panel, style="Panel.TFrame")
         btn_row.pack(fill=tk.X)
 
         def on_scan_custom_eboot() -> None:
+            nonlocal current_eboot_bytes
             p = filedialog.askopenfilename(
                 parent=win,
-                title="Seleccionar eboot.bin para escanear su framebuffer y límite de 30 FPS",
+                title="Seleccionar eboot.bin de cualquier juego PS4 para generar parche en tiempo real",
                 filetypes=[("eboot.bin / ELF", "*.bin *.elf"), ("Todos", "*.*")],
             )
             if p:
                 game.local_eboot_path = p
-                refresh_preview()
-                self.log(
-                    f"Escaneado eboot.bin: {p} ({len(discovered_matches)} matches de resolución, "
-                    f"{len(discovered_fps_matches)} bloqueos de 30 FPS detectados)"
-                )
+                current_eboot_bytes = Path(p).read_bytes()
+                run_live_scan()
+                self.log(f"Análisis en tiempo real de {p}: {len(live_candidates)} puntos de parcheo descubiertos.")
+
+        def on_fetch_from_ps4_live() -> None:
+            nonlocal current_eboot_bytes
+            current_eboot_bytes = None
+            game.local_eboot_path = None
+            run_live_scan()
 
         def on_apply_and_deploy() -> None:
             xml_content = xml_preview.get("1.0", tk.END).strip() + "\n"
-            tgt_w, tgt_h = TARGET_RESOLUTIONS.get(tgt_res_var.get(), (2560, 1440))
+            active_cands = [c for idx, c in enumerate(live_candidates) if candidate_enabled[idx]]
 
-            # Optionally patch eboot.bin directly if requested and matches were found
-            if patch_eboot_direct_var.get() and game.local_eboot_path and (discovered_matches or discovered_fps_matches):
-                ep = Path(game.local_eboot_path)
-                raw_eb = ep.read_bytes()
-                bak = Path(f"{ep}.res.bak")
-                if not bak.exists():
-                    bak.write_bytes(raw_eb)
-                patched_eb = raw_eb
-                if discovered_matches:
-                    patched_eb = patch_eboot_resolution_inplace(patched_eb, discovered_matches, tgt_w, tgt_h)
-                if unlock_60fps_var.get() and discovered_fps_matches:
-                    patched_eb = patch_eboot_framerate_inplace(patched_eb, discovered_fps_matches)
-                ep.write_bytes(patched_eb)
-                self.log(
-                    f"  [OK] eboot.bin parcheado directamente ({tgt_w}x{tgt_h}"
-                    f"{' + 60 FPS FlipRate=0' if (unlock_60fps_var.get() and discovered_fps_matches) else ''})."
-                )
+            if patch_eboot_direct_var.get() and current_eboot_bytes is not None and active_cands:
+                patched_eb = apply_live_candidates_to_eboot(current_eboot_bytes, active_cands)
+                if game.local_eboot_path:
+                    ep = Path(game.local_eboot_path)
+                    bak = Path(f"{ep}.res.bak")
+                    if not bak.exists():
+                        bak.write_bytes(current_eboot_bytes)
+                    ep.write_bytes(patched_eb)
+                    self.log(f"  [OK] eboot.bin local parcheado en tiempo real ({len(active_cands)} modificaciones).")
+                if self.ftp_client.is_connected and game.eboot_locations:
+                    for rep in game.eboot_locations:
+                        if self.ftp_client.upload_bytes(rep, patched_eb):
+                            self.log(f"  [OK] eboot.bin subido en vivo a la PS4: {rep}")
 
             ok, msg = self.ftp_client.deploy_goldhen_xml_patch(
                 title_id=game.title_id,
@@ -750,31 +830,38 @@ class NeoEnablerApp:
             game.has_goldhen_patch_xml = True
             self._refresh_table()
             self._on_tree_select()
-            messagebox.showinfo("Parche de Resolución / 60 FPS Generado", msg, parent=win)
+            messagebox.showinfo("Parche Generado e Inyectado en Tiempo Real", msg, parent=win)
             win.destroy()
 
         ttk.Button(
             btn_row,
-            text="🔍 Seleccionar eboot.bin y Re-escanear",
+            text="📂 Abrir eboot.bin Local",
             style="Secondary.TButton",
             command=on_scan_custom_eboot,
         ).pack(side=tk.LEFT, padx=(0, 8))
 
         ttk.Button(
             btn_row,
-            text="🔄 Actualizar Vista Previa",
+            text="📡 Extraer eboot.bin en Vivo de PS4 (FTP)",
+            style="Accent.TButton",
+            command=on_fetch_from_ps4_live,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Button(
+            btn_row,
+            text="🔄 Marcar/Desmarcar Offset Seleccionado",
             style="Secondary.TButton",
-            command=refresh_preview,
+            command=lambda: on_toggle_candidate(),
         ).pack(side=tk.LEFT)
 
         ttk.Button(
             btn_row,
-            text="🚀 Guardar e Inyectar XML en GoldHEN",
+            text="🚀 Generar e Inyectar Parche en PS4",
             style="Success.TButton",
             command=on_apply_and_deploy,
         ).pack(side=tk.RIGHT)
 
-        refresh_preview()
+        run_live_scan()
 
     def _on_connect_and_scan(self) -> None:
         host = self.ip_var.get().strip()

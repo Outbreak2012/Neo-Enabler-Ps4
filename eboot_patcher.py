@@ -276,8 +276,11 @@ def create_sample_fself_eboot(
 ) -> bytes:
     """
     Creates a realistic mock FSELF (Fake Signed SELF) eboot.bin containing an embedded ELF64 header,
-    a valid OrbisProcParam ('ORBI') block, and sample x86_64 framebuffer initialization instructions
-    (`MOV ECX, res_width; MOV EDX, res_height`) for testing old-SDK Neo Mode + Resolution upgrading.
+    a valid OrbisProcParam ('ORBI') block, and sample x86_64 instructions for:
+    - Framebuffer initialization (`MOV ECX, res_width; MOV EDX, res_height`)
+    - 30 FPS FlipRate lock (`MOV ESI, 2; CALL sceVideoOutSetFlipRate`)
+    - 30 FPS Fixed DeltaTime float (`0.033333335f` = `0x3D088889`)
+    for testing real-time patch generation on any unpatched PS4 game.
     """
     # 1. 32-byte SELF header (magic 0x1D3D154F, 1 segment entry)
     self_hdr = struct.pack(
@@ -344,15 +347,19 @@ def create_sample_fself_eboot(
         + b"\x00" * 40
     )
 
-    # 5. Simulated x86_64 framebuffer setup + 30 FPS fliprate lock instructions at offset 0x140:
+    # 5. Simulated x86_64 framebuffer setup + 30 FPS fliprate lock + 30 FPS deltatime float at offset 0x140:
     # - B9 <width_u32> (MOV ECX, width) + BA <height_u32> (MOV EDX, height)
     # - BE 02 00 00 00 (MOV ESI, 2 -> 30 FPS lock) + E8 10 00 00 00 (CALL sceVideoOutSetFlipRate)
+    # - F3 0F 10 05 04 00 00 00 (MOVSS XMM0, [rip+4]) + 30.0f (0x41F00000) + 0.033333335f (0x3D088889)
     code_block = (
         b"\x48\x89\xe5"
         + b"\xb9" + struct.pack("<I", res_width)
         + b"\xba" + struct.pack("<I", res_height)
         + b"\xbe\x02\x00\x00\x00"
         + b"\xe8\x10\x00\x00\x00"
+        + b"\xf3\x0f\x10\x05\x04\x00\x00\x00"
+        + struct.pack("<f", 30.0)
+        + struct.pack("<f", 1.0 / 30.0)
         + b"\x90" * 10
     )
 

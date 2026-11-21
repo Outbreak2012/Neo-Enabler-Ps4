@@ -79,6 +79,22 @@ class FramerateMatch:
     pattern_description: str
 
 
+@dataclass
+class LiveAnalyzedCandidate:
+    """Represents a single real-time discovered binary signature in the game's eboot.bin."""
+    category: str           # "Resolución", "Framerate (FlipRate)", "DeltaTime (30->60Hz)", "Aspect Ratio"
+    description: str
+    file_offset: int
+    vaddr: int
+    patch_type: str         # "bytes32", "bytes", "float32"
+    original_value_str: str
+    target_value_str: str
+    extra_offset: Optional[int] = None
+    extra_vaddr: Optional[int] = None
+    extra_target_str: Optional[str] = None
+    enabled_by_default: bool = True
+
+
 # Curated database of verified GoldHEN XML patches for iconic unpatched / old-SDK games
 CURATED_GAME_PATCHES: Dict[str, List[GoldHenPatchEntry]] = {
     # Bloodborne (US / EU / GOTY)
@@ -471,4 +487,220 @@ def patch_eboot_framerate_inplace(
     replacement = bytes.fromhex("31f6909090")
     for m in fps_matches:
         buf[m.file_offset : m.file_offset + 5] = replacement
+    return bytes(buf)
+
+
+def auto_detect_all_resolutions_in_eboot(
+    eboot_bytes: bytes,
+    base_vaddr: int = 0x00400000,
+) -> Dict[str, List[ResolutionMatch]]:
+    """
+    Real-time multi-resolution scanner: automatically probes the game's eboot.bin
+    for ALL standard PS4 rendering resolutions (720p, 792p, 800p, 900p, 1080p)
+    so the user doesn't even need to know what base resolution the game runs at.
+    """
+    results: Dict[str, List[ResolutionMatch]] = {}
+    for label, (w, h) in SOURCE_RESOLUTIONS.items():
+        found = scan_eboot_for_resolutions(eboot_bytes, source_width=w, source_height=h, base_vaddr=base_vaddr)
+        if found:
+            results[label] = found
+    return results
+
+
+def scan_eboot_for_deltatime_constants(
+    eboot_bytes: bytes,
+    base_vaddr: int = 0x00400000,
+) -> List[LiveAnalyzedCandidate]:
+    """
+    Scans a PS4 executable (`eboot.bin`) for 30 FPS fixed timestep / DeltaTime constants:
+    - `0.033333335f` (1/30 sec = `0x3D088889` / `89 88 08 3D` in IEEE-754 float32)
+      adjacent to `30.0f` (`0x41F00000`) or preceded by SSE scalar load (`F3 0F 10` / `C7`).
+      Upgrades to `0.016666668f` (1/60 sec = `0x3C888889`) for proper 60 FPS game physics speed.
+    """
+    candidates: List[LiveAnalyzedCandidate] = []
+    dt_30_bytes = struct.pack("<f", 1.0 / 30.0)  # 89 88 08 3d
+    dt_60_hex = f"0x{struct.unpack('<I', struct.pack('<f', 1.0 / 60.0))[0]:08x}"  # 0x3c888889
+    fps_30_bytes = struct.pack("<f", 30.0)       # 00 00 f0 41
+
+    pos = 0
+    data_len = len(eboot_bytes)
+    while True:
+        idx = eboot_bytes.find(dt_30_bytes, pos)
+        if idx == -1 or idx + 4 > data_len:
+            break
+        pos = idx + 4
+
+        # Validate context: nearby 30.0f constant or SSE MOVSS/MULSS/COMISS instruction within 32 bytes
+        win_start = max(0, idx - 24)
+        win_end = min(data_len, idx + 24)
+        window = eboot_bytes[win_start:win_end]
+        has_context = (fps_30_bytes in window) or (b"\xf3\x0f\x10" in window) or (b"\xf3\x0f\x59" in window)
+        if not has_context:
+            continue
+
+        candidates.append(
+            LiveAnalyzedCandidate(
+                category="DeltaTime (30->60Hz)",
+                description="Constante Timestep 30 FPS (0.0333333f -> 0.0166667f para físicas a 60 FPS)",
+                file_offset=idx,
+                vaddr=base_vaddr + idx,
+                patch_type="bytes32",
+                original_value_str="0x3d088889 (1/30s)",
+                target_value_str=dt_60_hex,
+                enabled_by_default=True,
+            )
+        )
+
+    return candidates
+
+
+def analyze_eboot_realtime(
+    eboot_bytes: bytes,
+    target_width: int = 2560,
+    target_height: int = 1440,
+    source_filter: Optional[Tuple[int, int]] = None,
+    base_vaddr: int = 0x00400000,
+) -> List[LiveAnalyzedCandidate]:
+    """
+    Complete Real-Time Dynamic Patch Analyzer for ANY game's eboot.bin (no database required):
+    1. Automatically scans for all base resolutions (or `source_filter` if specified) and builds
+       width/height upgrade candidates to (`target_width`, `target_height`).
+    2. Scans for `sceVideoOutSetFlipRate` 30 FPS locks (`MOV ESI, 1/2` before `CALL`) -> `rate = 0` (60 FPS).
+    3. Scans for 30 FPS DeltaTime float constants (`1/30s` = `0.0333333f`) -> `1/60s` (`0.0166667f`).
+    """
+    candidates: List[LiveAnalyzedCandidate] = []
+
+    # 1. Resolution candidates
+    if source_filter is not None:
+        res_groups = {f"{source_filter[0]}x{source_filter[1]}": scan_eboot_for_resolutions(
+            eboot_bytes, source_filter[0], source_filter[1], base_vaddr=base_vaddr
+        )}
+    else:
+        res_groups = auto_detect_all_resolutions_in_eboot(eboot_bytes, base_vaddr=base_vaddr)
+
+    for _label, matches in res_groups.items():
+        for m in matches:
+            if m.original_width == target_width and m.original_height == target_height:
+                continue
+            candidates.append(
+                LiveAnalyzedCandidate(
+                    category="Resolución",
+                    description=f"{m.pattern_description} ({m.original_width}x{m.original_height} -> {target_width}x{target_height})",
+                    file_offset=m.width_file_offset,
+                    vaddr=m.width_vaddr,
+                    patch_type="bytes32",
+                    original_value_str=f"{m.original_width}x{m.original_height}",
+                    target_value_str=f"0x{target_width:08x}",
+                    extra_offset=m.height_file_offset,
+                    extra_vaddr=m.height_vaddr,
+                    extra_target_str=f"0x{target_height:08x}",
+                    enabled_by_default=True,
+                )
+            )
+
+    # 2. Framerate FlipRate candidates (sceVideoOutSetFlipRate)
+    fps_matches = scan_eboot_for_framerate_lock(eboot_bytes, base_vaddr=base_vaddr)
+    for fm in fps_matches:
+        candidates.append(
+            LiveAnalyzedCandidate(
+                category="Framerate (FlipRate)",
+                description=fm.pattern_description,
+                file_offset=fm.file_offset,
+                vaddr=fm.vaddr,
+                patch_type="bytes",
+                original_value_str=fm.original_bytes_hex,
+                target_value_str=fm.patched_bytes_hex,
+                enabled_by_default=True,
+            )
+        )
+
+    # 3. Fixed DeltaTime 30 FPS -> 60 FPS float candidates
+    dt_candidates = scan_eboot_for_deltatime_constants(eboot_bytes, base_vaddr=base_vaddr)
+    candidates.extend(dt_candidates)
+
+    return candidates
+
+
+def build_xml_from_live_candidates(
+    title_id: str,
+    title: str,
+    app_ver: str,
+    selected_candidates: List[LiveAnalyzedCandidate],
+    include_curated: bool = False,
+) -> str:
+    """
+    Builds a complete GoldHEN XML patch file from the user-checked real-time analyzed candidates.
+    Groups lines cleanly by category (Resolution, Framerate FlipRate, DeltaTime) so the user can
+    toggle each patch individually inside GoldHEN's Cheat/Patch Menu on the PS4!
+    """
+    entries: List[GoldHenPatchEntry] = []
+    tid_upper = title_id.upper()
+
+    if include_curated and tid_upper in CURATED_GAME_PATCHES:
+        for cur in CURATED_GAME_PATCHES[tid_upper]:
+            entries.append(
+                GoldHenPatchEntry(
+                    title=title or cur.title,
+                    name=cur.name,
+                    note=cur.note,
+                    author=cur.author,
+                    app_ver=app_ver or cur.app_ver,
+                    lines=list(cur.lines),
+                )
+            )
+
+    by_cat: Dict[str, List[LiveAnalyzedCandidate]] = {}
+    for c in selected_candidates:
+        by_cat.setdefault(c.category, []).append(c)
+
+    for cat, cands in by_cat.items():
+        xml_lines: List[XmlPatchLine] = []
+        for c in cands:
+            xml_lines.append(
+                XmlPatchLine(
+                    line_type=c.patch_type,
+                    address=f"0x{c.vaddr:08x}",
+                    value=c.target_value_str,
+                    comment=c.description,
+                )
+            )
+            if c.extra_vaddr is not None and c.extra_target_str is not None:
+                xml_lines.append(
+                    XmlPatchLine(
+                        line_type=c.patch_type,
+                        address=f"0x{c.extra_vaddr:08x}",
+                        value=c.extra_target_str,
+                        comment=f"Height -> {c.extra_target_str}",
+                    )
+                )
+        entries.append(
+            GoldHenPatchEntry(
+                title=title,
+                name=f"NEOENABLER Live Generator - {cat}",
+                note=f"Generado en tiempo real analizando el eboot.bin de {title} ({title_id}).",
+                author="NEOENABLER Real-Time Engine",
+                app_ver=app_ver,
+                lines=xml_lines,
+            )
+        )
+
+    return build_goldhen_xml(title_id, entries)
+
+
+def apply_live_candidates_to_eboot(
+    eboot_bytes: bytes,
+    selected_candidates: List[LiveAnalyzedCandidate],
+) -> bytes:
+    """Applies the selected real-time candidates directly into the eboot.bin bytes."""
+    buf = bytearray(eboot_bytes)
+    for c in selected_candidates:
+        if c.patch_type == "bytes32":
+            val = int(c.target_value_str, 16)
+            buf[c.file_offset : c.file_offset + 4] = struct.pack("<I", val)
+            if c.extra_offset is not None and c.extra_target_str is not None:
+                val2 = int(c.extra_target_str, 16)
+                buf[c.extra_offset : c.extra_offset + 4] = struct.pack("<I", val2)
+        elif c.patch_type == "bytes":
+            raw_patch = bytes.fromhex(c.target_value_str)
+            buf[c.file_offset : c.file_offset + len(raw_patch)] = raw_patch
     return bytes(buf)

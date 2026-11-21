@@ -773,3 +773,50 @@ class GoldHenFtpClient:
         )
         log(f"  [OK] {msg}")
         return True, msg
+
+    def fetch_game_eboot_bytes(
+        self,
+        game: InstalledGame,
+        log_cb: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[Optional[bytes], Optional[str]]:
+        """
+        Fetches the raw eboot.bin bytes for the selected game in real-time:
+        1. If `game.local_eboot_path` exists on PC, reads it directly.
+        2. If connected via FTP, checks `/mnt/sandbox/pfsmnt/<TITLE_ID>-app0/eboot.bin`
+           or `/mnt/sandbox/pfsmnt/<TITLE_ID>-patch0/eboot.bin` (if the game is running/mounted on the PS4)
+           and caches it locally inside `backups/<TITLE_ID>/live_eboot.bin` for instant analysis.
+        Returns (eboot_bytes, local_or_remote_source_path).
+        """
+        def log(msg: str) -> None:
+            if log_cb:
+                log_cb(msg)
+
+        if game.local_eboot_path and Path(game.local_eboot_path).exists():
+            log(f"Leyendo eboot.bin local de {game.title_id}: {game.local_eboot_path}")
+            return Path(game.local_eboot_path).read_bytes(), game.local_eboot_path
+
+        if not self.ftp or not self.is_connected:
+            return None, None
+
+        # Check known eboot locations or re-scan /mnt/sandbox/pfsmnt for freshly launched game
+        candidates = list(game.eboot_locations)
+        tid = game.title_id.upper()
+        for suffix in ("app0", "patch0"):
+            rpath = f"{SANDBOX_PFSMNT_DIR}/{tid}-{suffix}/eboot.bin"
+            if rpath not in candidates:
+                candidates.append(rpath)
+
+        for rpath in candidates:
+            log(f"Intentando descargar eboot.bin en tiempo real desde PS4 ({rpath})...")
+            data = self.download_bytes(rpath)
+            if data and len(data) > 64:
+                cache_dir = self.backup_manager.get_title_backup_dir(tid)
+                local_cache = cache_dir / f"{tid}_live_eboot.bin"
+                local_cache.write_bytes(data)
+                game.local_eboot_path = str(local_cache)
+                if rpath not in game.eboot_locations:
+                    game.eboot_locations.append(rpath)
+                log(f"  [OK] eboot.bin descargado en tiempo real ({len(data):,} bytes) -> {local_cache}")
+                return data, rpath
+
+        return None, None

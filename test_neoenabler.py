@@ -19,7 +19,10 @@ from eboot_patcher import (
 )
 from ps4_ftp import BackupManager, GoldHenFtpClient, InstalledGame
 from resolution_patcher import (
+    analyze_eboot_realtime,
+    apply_live_candidates_to_eboot,
     build_goldhen_xml,
+    build_xml_from_live_candidates,
     generate_framerate_patch_entry,
     generate_resolution_patch_entries,
     patch_eboot_framerate_inplace,
@@ -170,6 +173,33 @@ class TestNeoEnabler(unittest.TestCase):
 
         patched_fps_eb = patch_eboot_framerate_inplace(raw_eboot, fps_matches)
         self.assertEqual(len(scan_eboot_for_framerate_lock(patched_fps_eb)), 0)
+
+    def test_realtime_live_patch_generator_zero_database(self) -> None:
+        # Simulate an unknown game (CUSA99999) not in any patch database
+        raw_eboot = create_sample_fself_eboot(sdk_version=0x02000001, res_width=1600, res_height=900)
+        candidates = analyze_eboot_realtime(raw_eboot, target_width=2560, target_height=1440)
+
+        categories = {c.category for c in candidates}
+        self.assertIn("Resolución", categories)
+        self.assertIn("Framerate (FlipRate)", categories)
+        self.assertIn("DeltaTime (30->60Hz)", categories)
+
+        xml_live = build_xml_from_live_candidates(
+            title_id="CUSA99999",
+            title="Unknown Game",
+            app_ver="01.00",
+            selected_candidates=candidates,
+            include_curated=False,
+        )
+        self.assertIn("<ID>CUSA99999</ID>", xml_live)
+        self.assertIn("NEOENABLER Live Generator - Resolución", xml_live)
+        self.assertIn("NEOENABLER Live Generator - Framerate (FlipRate)", xml_live)
+        self.assertIn("NEOENABLER Live Generator - DeltaTime (30->60Hz)", xml_live)
+
+        # Apply live candidates directly to eboot.bin and verify the old patterns were replaced
+        patched_eb = apply_live_candidates_to_eboot(raw_eboot, candidates)
+        remaining = analyze_eboot_realtime(patched_eb, target_width=2560, target_height=1440)
+        self.assertEqual(len(remaining), 0)
 
 
 if __name__ == "__main__":

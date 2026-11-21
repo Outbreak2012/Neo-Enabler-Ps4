@@ -1,8 +1,8 @@
 """
-NEOENABLER v2.0 - PS4 Pro (Neo Mode) Unlocker & Old-SDK Patcher for GoldHEN
+NEOENABLER v2.5 - PS4 Pro (Neo Mode) Unlocker, Old-SDK Patcher & Resolution/60FPS Enhancer for GoldHEN
 Desktop GUI & CLI application to unlock 100% PS4 Pro GPU (36 CUs @ 911 MHz + 512 MB RAM)
-in unpatched base PS4 games — specifically engineered to inject Neo Mode into games compiled
-with OLD SDKs (< SDK 4.00) without triggering the libSceGnmDriverForNeoMode CE-34878-0 crash.
+in unpatched base PS4 games, upgrade old SDKs (< 4.00 -> 4.50 Neo), and generate/inject
+GoldHEN Resolution (1080p / 1440p / 1620p / 4K) & 60 FPS patches.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from eboot_patcher import (
     NEO_COMPAT_SDK_VERSION,
@@ -22,10 +22,20 @@ from eboot_patcher import (
     patch_eboot_sdk_version,
 )
 from ps4_ftp import BackupManager, GoldHenFtpClient, InstalledGame
+from resolution_patcher import (
+    CURATED_GAME_PATCHES,
+    SOURCE_RESOLUTIONS,
+    TARGET_RESOLUTIONS,
+    ResolutionMatch,
+    build_goldhen_xml,
+    generate_resolution_patch_entries,
+    patch_eboot_resolution_inplace,
+    scan_eboot_for_resolutions,
+)
 from sfo_parser import NEO_MODE_BIT, SfoFile, create_sample_sfo
 
 
-APP_TITLE = "NEOENABLER v2.0 - Inyector Modo Neo & Parcheador de SDK Antiguo (GoldHEN)"
+APP_TITLE = "NEOENABLER v2.5 - Inyector Modo Neo + Fix SDK Antiguo + Escalador de Resolución (GoldHEN)"
 
 # Dark PlayStation-inspired theme palette
 BG_DARK = "#0d1117"
@@ -37,6 +47,7 @@ ACCENT_BLUE = "#1f6feb"
 ACCENT_BLUE_HOVER = "#388bfd"
 ACCENT_GREEN = "#238636"
 ACCENT_PURPLE = "#8957e5"
+ACCENT_CYAN = "#0969da"
 ACCENT_ORANGE = "#d29922"
 ACCENT_RED = "#da3633"
 
@@ -45,8 +56,8 @@ class NeoEnablerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("1180x750")
-        self.root.minsize(1000, 640)
+        self.root.geometry("1220x770")
+        self.root.minsize(1040, 660)
         self.root.configure(bg=BG_DARK)
 
         self.backup_manager = BackupManager()
@@ -61,7 +72,7 @@ class NeoEnablerApp:
         self.search_var = tk.StringVar(value="")
         self.filter_only_base_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(
-            value="Listo — Conéctate a GoldHEN FTP o abre archivos param.sfo + eboot.bin para inyectar Modo Neo en SDKs antiguos"
+            value="Listo — Conéctate a GoldHEN FTP o abre archivos param.sfo + eboot.bin para inyectar Modo Neo y subir resolución"
         )
 
         self._configure_styles()
@@ -90,6 +101,14 @@ class NeoEnablerApp:
             insertcolor=FG_PRIMARY,
             borderwidth=1,
             padding=5,
+        )
+
+        style.configure(
+            "TCombobox",
+            fieldbackground=BG_CARD,
+            background=BG_CARD,
+            foreground=FG_PRIMARY,
+            padding=4,
         )
 
         style.configure(
@@ -193,13 +212,13 @@ class NeoEnablerApp:
 
         ttk.Label(
             title_row,
-            text="⚡ NEOENABLER v2.0 — Inyector de Modo Neo en Juegos con SDK Antiguo (< FW 4.00)",
+            text="⚡ NEOENABLER v2.5 — Inyector Modo Neo + Fix SDK Antiguo + Escalador de Resolución (1080p/1440p/4K)",
             style="Header.TLabel",
         ).pack(side=tk.LEFT)
 
         ttk.Label(
             title_row,
-            text="Parchea PARAM.SFO + OrbisProcParam ('ORBI' en eboot.bin) + Plugin GoldHEN",
+            text="GoldHEN FTP (2121) • PARAM.SFO • EBOOT ORBI • GoldHEN XML Patches",
             style="Muted.TLabel",
         ).pack(side=tk.RIGHT, padx=4)
 
@@ -207,7 +226,7 @@ class NeoEnablerApp:
         conn_row.pack(fill=tk.X)
 
         ttk.Label(conn_row, text="IP PS4:", style="Panel.TLabel").pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Entry(conn_row, textvariable=self.ip_var, width=15).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Entry(conn_row, textvariable=self.ip_var, width=14).pack(side=tk.LEFT, padx=(0, 8))
 
         ttk.Label(conn_row, text="Puerto:", style="Panel.TLabel").pack(side=tk.LEFT, padx=(0, 4))
         ttk.Entry(conn_row, textvariable=self.port_var, width=6).pack(side=tk.LEFT, padx=(0, 10))
@@ -230,15 +249,15 @@ class NeoEnablerApp:
 
         self.btn_eboot = ttk.Button(
             conn_row,
-            text="🧬 Parchear eboot.bin (SDK < 4.00)",
-            style="Purple.TButton",
+            text="🧬 Parchear eboot.bin (SDK)",
+            style="Secondary.TButton",
             command=self._on_open_and_patch_eboot,
         )
         self.btn_eboot.pack(side=tk.LEFT, padx=(0, 6))
 
         self.btn_demo = ttk.Button(
             conn_row,
-            text="🧪 Cargar Demo (SDK Antiguo)",
+            text="🧪 Cargar Demo",
             style="Secondary.TButton",
             command=self._on_load_demo_games,
         )
@@ -246,9 +265,9 @@ class NeoEnablerApp:
 
         ttk.Checkbutton(
             conn_row,
-            text="Auto-Elevar SDK Antiguo (< 4.00 -> 4.50 Neo)",
+            text="Auto-Elevar SDK (< 4.00 -> 4.50)",
             variable=self.patch_old_sdk_var,
-        ).pack(side=tk.LEFT, padx=(0, 10))
+        ).pack(side=tk.LEFT, padx=(0, 8))
 
         ttk.Checkbutton(
             conn_row,
@@ -261,14 +280,14 @@ class NeoEnablerApp:
         filter_panel.pack(fill=tk.X, padx=10, pady=(0, 6))
 
         ttk.Label(filter_panel, text="🔍 Buscar:", style="Panel.TLabel").pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Entry(filter_panel, textvariable=self.search_var, width=25).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Entry(filter_panel, textvariable=self.search_var, width=22).pack(side=tk.LEFT, padx=(0, 10))
 
         ttk.Checkbutton(
             filter_panel,
-            text="Solo juegos sin Modo Neo",
+            text="Solo sin Modo Neo",
             variable=self.filter_only_base_var,
             command=self._refresh_table,
-        ).pack(side=tk.LEFT, padx=(0, 16))
+        ).pack(side=tk.LEFT, padx=(0, 12))
 
         self.btn_restore = ttk.Button(
             filter_panel,
@@ -286,9 +305,17 @@ class NeoEnablerApp:
         )
         self.btn_disable_neo.pack(side=tk.RIGHT, padx=(6, 0))
 
+        self.btn_res_enhancer = ttk.Button(
+            filter_panel,
+            text="🖥️ Mejorar Resolución / 60 FPS (XML)",
+            style="Purple.TButton",
+            command=self._on_open_resolution_window,
+        )
+        self.btn_res_enhancer.pack(side=tk.RIGHT, padx=(6, 0))
+
         self.btn_enable_neo = ttk.Button(
             filter_panel,
-            text="🚀 INYECTAR MODO NEO + FIX SDK ANTIGUO",
+            text="🚀 INYECTAR MODO NEO + FIX SDK",
             style="Success.TButton",
             command=lambda: self._on_set_neo_selected(True),
         )
@@ -301,7 +328,16 @@ class NeoEnablerApp:
         table_frame = ttk.Frame(main_pane, style="Panel.TFrame")
         table_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
 
-        columns = ("title_id", "title", "app_ver", "sys_ver", "sdk_status", "attribute", "neo_state", "locations")
+        columns = (
+            "title_id",
+            "title",
+            "app_ver",
+            "sys_ver",
+            "sdk_status",
+            "res_patch",
+            "attribute",
+            "neo_state",
+        )
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="extended")
 
         self.tree.heading("title_id", text="Title ID")
@@ -309,18 +345,18 @@ class NeoEnablerApp:
         self.tree.heading("app_ver", text="Ver.")
         self.tree.heading("sys_ver", text="SYSTEM_VER")
         self.tree.heading("sdk_status", text="Diagnóstico SDK")
+        self.tree.heading("res_patch", text="Parche Res/60FPS")
         self.tree.heading("attribute", text="ATTRIBUTE")
         self.tree.heading("neo_state", text="Estado Modo Neo")
-        self.tree.heading("locations", text="Archivos")
 
-        self.tree.column("title_id", width=90, anchor=tk.CENTER)
-        self.tree.column("title", width=210, anchor=tk.W)
+        self.tree.column("title_id", width=88, anchor=tk.CENTER)
+        self.tree.column("title", width=215, anchor=tk.W)
         self.tree.column("app_ver", width=55, anchor=tk.CENTER)
-        self.tree.column("sys_ver", width=115, anchor=tk.CENTER)
-        self.tree.column("sdk_status", width=135, anchor=tk.CENTER)
+        self.tree.column("sys_ver", width=110, anchor=tk.CENTER)
+        self.tree.column("sdk_status", width=130, anchor=tk.CENTER)
+        self.tree.column("res_patch", width=125, anchor=tk.CENTER)
         self.tree.column("attribute", width=95, anchor=tk.CENTER)
         self.tree.column("neo_state", width=130, anchor=tk.CENTER)
-        self.tree.column("locations", width=130, anchor=tk.W)
 
         self.tree.tag_configure("neo_on", foreground="#3fb950")
         self.tree.tag_configure("old_sdk_base", foreground="#ff7b72")
@@ -336,11 +372,11 @@ class NeoEnablerApp:
         self.tree.bind("<Double-1>", lambda _e: self._on_toggle_double_click())
 
         # Right Inspector Panel
-        inspector = ttk.Frame(main_pane, style="Panel.TFrame", width=350, padding=12)
+        inspector = ttk.Frame(main_pane, style="Panel.TFrame", width=355, padding=12)
         inspector.pack(side=tk.RIGHT, fill=tk.Y)
         inspector.pack_propagate(False)
 
-        ttk.Label(inspector, text="🔬 Diagnóstico de SDK & PARAM.SFO", style="SubHeader.TLabel").pack(
+        ttk.Label(inspector, text="🔬 Diagnóstico de SDK, Resolución & SFO", style="SubHeader.TLabel").pack(
             anchor=tk.W, pady=(0, 8)
         )
 
@@ -357,17 +393,14 @@ class NeoEnablerApp:
         )
         self.detail_text.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         self._set_inspector_text(
-            "¿Por qué crashean los juegos con SDK antiguo (< 4.00) al activar Modo Neo?\n\n"
-            "1. Al activar el bit 23 (0x00800000) en param.sfo, la PS4 Pro carga "
-            "libSceGnmDriverForNeoMode.sprx.\n"
-            "2. Ese driver verifica el sdk_version dentro de la cabecera 'ORBI' "
-            "(PT_SCE_PROCPARAM) del eboot.bin y el SYSTEM_VER del param.sfo.\n"
-            "3. Si ve un SDK < 0x04000000 (anterior al lanzamiento de PS4 Pro), "
-            "aborta la inicialización de la GPU con error CE-34878-0.\n\n"
-            "SOLUCIÓN DE NEOENABLER v2.0:\n"
-            "• Eleva automáticamente SYSTEM_VER en param.sfo a 0x04500000.\n"
-            "• Parchea el sdk_version en la estructura 'ORBI' del eboot.bin (FSELF/ELF) a 0x04500001.\n"
-            "• Incluye además el plugin 'goldhen_plugin/neoenabler_sdk.c' para hacer el spoof en RAM."
+            "NOVEDAD EN NEOENABLER v2.5:\n"
+            "¡Mejora de Resolución (1080p / 1440p / 1620p / 4K) y 60 FPS integrada!\n\n"
+            "1. Inyecta primero el Modo Neo (+ Fix SDK 4.50) para desbloquear las "
+            "36 CUs @ 911 MHz y +512 MB de RAM.\n"
+            "2. Pulsa el botón morado '🖥️ Mejorar Resolución / 60 FPS (XML)'.\n"
+            "3. Puedes aplicar parches verificados (Bloodborne 1440p/60fps, Driveclub 1440p/60fps, "
+            "The Order 1886 1080p 16:9, AC Unity 1080p/1440p) o usar el Escáner Universal "
+            "de eboot.bin para subir cualquier juego de 720p/900p/1080p a 1080p/1440p."
         )
 
         tip_frame = ttk.Frame(inspector, style="Card.TFrame", padding=8)
@@ -375,14 +408,15 @@ class NeoEnablerApp:
         ttk.Label(
             tip_frame,
             text=(
-                "🧬 Parcheo de SDK Antiguo:\n"
-                "Si tienes el juego abierto/montado en la PS4 (o seleccionas su eboot.bin FPKG en PC), "
-                "NEOENABLER localiza la firma 'ORBI' (+0x10) y actualiza el SDK a 4.50 automáticamente."
+                "🖥️ ¿Cómo funcionan los parches XML en GoldHEN?\n"
+                "NEOENABLER genera el archivo <CUSAXXXXX>.xml y lo sube por FTP a "
+                "/data/GoldHEN/patches/xml/ (o parcha el eboot.bin directo) para que el juego "
+                "renderice a mayor resolución usando la GPU de PS4 Pro."
             ),
             background=BG_CARD,
             foreground="#d2a8ff",
             font=("Segoe UI", 8),
-            wraplength=315,
+            wraplength=320,
             justify=tk.LEFT,
         ).pack(fill=tk.X)
 
@@ -414,7 +448,7 @@ class NeoEnablerApp:
         ).pack(side=tk.RIGHT)
 
         self.log(
-            "NEOENABLER v2.0 listo. Motor de inyección Neo Mode para SDKs antiguos (< 4.00 -> 4.50) activado."
+            "NEOENABLER v2.5 iniciado. Inyector de Modo Neo + Fix SDK Antiguo + Escalador de Resolución listo."
         )
 
     def log(self, message: str) -> None:
@@ -452,6 +486,13 @@ class NeoEnablerApp:
                 sdk_status = "✅ SDK >= 4.00 (OK)"
                 tag = "neo_on" if game.is_neo_enabled else "neo_off"
 
+            if game.has_goldhen_patch_xml:
+                res_patch_str = "✨ XML Instalado"
+            elif tid.upper() in CURATED_GAME_PATCHES:
+                res_patch_str = "🎯 Perfil 1440p/60"
+            else:
+                res_patch_str = "🔍 Auto-Escáner"
+
             item_id = self.tree.insert(
                 "",
                 tk.END,
@@ -461,9 +502,9 @@ class NeoEnablerApp:
                     game.app_ver,
                     game.system_ver,
                     sdk_status,
+                    res_patch_str,
                     game.attribute_hex,
                     neo_str,
-                    game.locations_summary,
                 ),
                 tags=(tag,),
             )
@@ -480,6 +521,7 @@ class NeoEnablerApp:
             return
 
         sfo = next(iter(game.sfo_locations.values()), None)
+        curated = CURATED_GAME_PATCHES.get(tid.upper(), [])
         lines = [
             f"TÍTULO:      {game.title}",
             f"TITLE ID:    {game.title_id} (v{game.app_ver})",
@@ -489,14 +531,18 @@ class NeoEnablerApp:
             f"MODO NEO:    {'ACTIVO (Bit 23 = 1)' if game.is_neo_enabled else 'INACTIVO (Bit 23 = 0)'}",
         ]
 
+        if curated:
+            lines.append("-" * 38)
+            lines.append("🎯 Parches de Resolución / 60 FPS incluidos:")
+            for cp in curated:
+                lines.append(f" • {cp.name}")
+
         if game.eboot_analysis:
             ea = game.eboot_analysis
             lines.append("-" * 38)
             lines.append(f"EBOOT.BIN:   {ea.container_type}")
             if ea.primary_sdk_version:
                 lines.append(f"ORBI SDK:    {format_sdk_version(ea.primary_sdk_version)}")
-            for loc in ea.locations:
-                lines.append(f" • {loc.kind} @ +0x{loc.sdk_version_offset:X}")
 
         if sfo:
             lines.append("-" * 38)
@@ -509,6 +555,192 @@ class NeoEnablerApp:
                 lines.append(" • (Ninguno)")
 
         self._set_inspector_text("\n".join(lines))
+
+    def _on_open_resolution_window(self) -> None:
+        """Opens the Resolution & 60 FPS Patch Generator / Deployer dialog for the selected game."""
+        selected = self._get_selected_games()
+        if not selected:
+            return
+        game = selected[0]
+
+        win = tk.Toplevel(self.root)
+        win.title(f"🖥️ Escalador de Resolución & 60 FPS — {game.title} ({game.title_id})")
+        win.geometry("760x620")
+        win.configure(bg=BG_DARK)
+        win.transient(self.root)
+        win.grab_set()
+
+        panel = ttk.Frame(win, style="Panel.TFrame", padding=14)
+        panel.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        ttk.Label(
+            panel,
+            text=f"🖥️ Mejora de Resolución y Framerate para {game.title} ({game.title_id})",
+            style="Header.TLabel",
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        curated_list = CURATED_GAME_PATCHES.get(game.title_id.upper(), [])
+        if curated_list:
+            cur_text = "✨ Este título tiene parches verificados en la base de datos: " + ", ".join(
+                c.name for c in curated_list
+            )
+        else:
+            cur_text = (
+                "🔍 Este título usará el Escáner Heurístico de eboot.bin para localizar y escalar el framebuffer."
+            )
+        ttk.Label(panel, text=cur_text, style="SubHeader.TLabel", wraplength=710).pack(anchor=tk.W, pady=(0, 10))
+
+        # Controls frame
+        ctrl_frame = ttk.Frame(panel, style="Card.TFrame", padding=10)
+        ctrl_frame.pack(fill=tk.X, pady=(0, 10))
+
+        row1 = ttk.Frame(ctrl_frame, style="Card.TFrame")
+        row1.pack(fill=tk.X, pady=(0, 8))
+
+        ttk.Label(row1, text="Resolución Base Original:", background=BG_CARD, foreground=FG_PRIMARY).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        src_res_var = tk.StringVar(value="900p (1600x900)")
+        src_combo = ttk.Combobox(row1, textvariable=src_res_var, values=list(SOURCE_RESOLUTIONS.keys()), width=24, state="readonly")
+        src_combo.pack(side=tk.LEFT, padx=(0, 14))
+
+        ttk.Label(row1, text="Nueva Resolución (Modo Neo):", background=BG_CARD, foreground="#3fb950").pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        tgt_res_var = tk.StringVar(value="1440p QHD 2K (2560x1440)")
+        tgt_combo = ttk.Combobox(row1, textvariable=tgt_res_var, values=list(TARGET_RESOLUTIONS.keys()), width=26, state="readonly")
+        tgt_combo.pack(side=tk.LEFT)
+
+        row2 = ttk.Frame(ctrl_frame, style="Card.TFrame")
+        row2.pack(fill=tk.X)
+
+        include_curated_var = tk.BooleanVar(value=True)
+        patch_eboot_direct_var = tk.BooleanVar(value=False)
+
+        ttk.Checkbutton(
+            row2,
+            text="Incluir perfil verificado (Resolución + 60 FPS) si existe",
+            variable=include_curated_var,
+        ).pack(side=tk.LEFT, padx=(0, 16))
+
+        ttk.Checkbutton(
+            row2,
+            text="Parchear también el eboot.bin directamente en disco",
+            variable=patch_eboot_direct_var,
+        ).pack(side=tk.LEFT)
+
+        # XML Preview Box
+        ttk.Label(
+            panel,
+            text="📄 Vista previa del Parche XML para GoldHEN (/data/GoldHEN/patches/xml/):",
+            style="Panel.TLabel",
+        ).pack(anchor=tk.W, pady=(0, 4))
+
+        xml_preview = tk.Text(
+            panel,
+            bg=BG_CARD,
+            fg="#79c0ff",
+            font=("Consolas", 9),
+            height=16,
+            relief=tk.FLAT,
+            padx=8,
+            pady=8,
+        )
+        xml_preview.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        discovered_matches: List[ResolutionMatch] = []
+
+        def refresh_preview() -> None:
+            nonlocal discovered_matches
+            discovered_matches = []
+            src_w, src_h = SOURCE_RESOLUTIONS.get(src_res_var.get(), (1600, 900))
+            tgt_w, tgt_h = TARGET_RESOLUTIONS.get(tgt_res_var.get(), (2560, 1440))
+
+            # Scan eboot.bin if available locally
+            if game.local_eboot_path and Path(game.local_eboot_path).exists():
+                raw_eb = Path(game.local_eboot_path).read_bytes()
+                discovered_matches = scan_eboot_for_resolutions(raw_eb, src_w, src_h)
+
+            entries = generate_resolution_patch_entries(
+                title_id=game.title_id,
+                title=game.title,
+                app_ver=game.app_ver,
+                matches=discovered_matches,
+                target_width=tgt_w,
+                target_height=tgt_h,
+                include_curated=include_curated_var.get(),
+            )
+            xml_str = build_goldhen_xml(game.title_id, entries)
+            xml_preview.delete("1.0", tk.END)
+            xml_preview.insert(tk.END, xml_str)
+
+        src_combo.bind("<<ComboboxSelected>>", lambda _e: refresh_preview())
+        tgt_combo.bind("<<ComboboxSelected>>", lambda _e: refresh_preview())
+
+        btn_row = ttk.Frame(panel, style="Panel.TFrame")
+        btn_row.pack(fill=tk.X)
+
+        def on_scan_custom_eboot() -> None:
+            p = filedialog.askopenfilename(
+                parent=win,
+                title="Seleccionar eboot.bin para escanear su framebuffer de resolución",
+                filetypes=[("eboot.bin / ELF", "*.bin *.elf"), ("Todos", "*.*")],
+            )
+            if p:
+                game.local_eboot_path = p
+                refresh_preview()
+                self.log(f"Escaneado eboot.bin para resolución: {p} ({len(discovered_matches)} coincidencias x86_64)")
+
+        def on_apply_and_deploy() -> None:
+            xml_content = xml_preview.get("1.0", tk.END).strip() + "\n"
+            tgt_w, tgt_h = TARGET_RESOLUTIONS.get(tgt_res_var.get(), (2560, 1440))
+
+            # Optionally patch eboot.bin directly if requested and matches were found
+            if patch_eboot_direct_var.get() and game.local_eboot_path and discovered_matches:
+                ep = Path(game.local_eboot_path)
+                raw_eb = ep.read_bytes()
+                bak = Path(f"{ep}.res.bak")
+                if not bak.exists():
+                    bak.write_bytes(raw_eb)
+                patched_eb = patch_eboot_resolution_inplace(raw_eb, discovered_matches, tgt_w, tgt_h)
+                ep.write_bytes(patched_eb)
+                self.log(
+                    f"  [OK] eboot.bin parcheado directamente a {tgt_w}x{tgt_h} ({len(discovered_matches)} instrucciones)."
+                )
+
+            ok, msg = self.ftp_client.deploy_goldhen_xml_patch(
+                title_id=game.title_id,
+                xml_content=xml_content,
+                log_cb=self.log,
+            )
+            game.has_goldhen_patch_xml = True
+            self._refresh_table()
+            self._on_tree_select()
+            messagebox.showinfo("Parche de Resolución / 60 FPS Generado", msg, parent=win)
+            win.destroy()
+
+        ttk.Button(
+            btn_row,
+            text="🔍 Seleccionar eboot.bin y Re-escanear",
+            style="Secondary.TButton",
+            command=on_scan_custom_eboot,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Button(
+            btn_row,
+            text="🔄 Actualizar Vista Previa",
+            style="Secondary.TButton",
+            command=refresh_preview,
+        ).pack(side=tk.LEFT)
+
+        ttk.Button(
+            btn_row,
+            text="🚀 Guardar e Inyectar XML en GoldHEN",
+            style="Success.TButton",
+            command=on_apply_and_deploy,
+        ).pack(side=tk.RIGHT)
+
+        refresh_preview()
 
     def _on_connect_and_scan(self) -> None:
         host = self.ip_var.get().strip()
@@ -557,7 +789,6 @@ class NeoEnablerApp:
             try:
                 sfo = SfoFile.from_file(p)
                 tid = sfo.title_id if sfo.title_id != "UNKNOWN" else Path(p).stem.upper()
-                # Check if an eboot.bin sits next to param.sfo or in parent folder (../eboot.bin)
                 sfo_path_obj = Path(p).resolve()
                 candidate_eboots = [
                     sfo_path_obj.parent / "eboot.bin",
@@ -593,7 +824,6 @@ class NeoEnablerApp:
         self._refresh_table()
 
     def _on_open_and_patch_eboot(self) -> None:
-        """Allows selecting a standalone eboot.bin (ELF or FSELF) to inspect and upgrade its ORBI sdk_version."""
         path = filedialog.askopenfilename(
             title="Seleccionar eboot.bin / .elf / .prx (FPKG desencriptado)",
             filetypes=[("PS4 Executable (eboot.bin / .elf / .prx)", "*.bin *.elf *.prx *.sprx"), ("Todos", "*.*")],
@@ -631,7 +861,6 @@ class NeoEnablerApp:
                 patched_bytes, new_analysis = patch_eboot_sdk_version(raw, NEO_COMPAT_SDK_VERSION)
                 Path(path).write_bytes(patched_bytes)
 
-                # Attach to selected game if any
                 sel = self.tree.selection()
                 if sel:
                     tid = str(self.tree.item(sel[0], "values")[0])
@@ -654,15 +883,14 @@ class NeoEnablerApp:
             messagebox.showerror("Error procesando eboot.bin", str(e))
 
     def _on_load_demo_games(self) -> None:
-        """Creates sample param.sfo AND mock FSELF eboot.bin files compiled with old SDKs (< 4.00)."""
         demo_dir = Path(__file__).resolve().parent / "demo_sfo"
         demo_dir.mkdir(parents=True, exist_ok=True)
 
         samples = [
             ("CUSA00552", "Driveclub (SDK 2.00 - Pre-Pro)", "01.28", 0x00008002, 0x02000000, 0x02000001),
-            ("CUSA00129", "Assassin's Creed Unity (SDK 2.50 - Pre-Pro)", "01.05", 0x00000002, 0x02500000, 0x02500001),
-            ("CUSA00900", "Bloodborne (SDK 2.50 / Patch 3.50 - Pre-Pro)", "01.09", 0x00000002, 0x03500000, 0x03500001),
-            ("CUSA00207", "The Order: 1886 (SDK 2.00 - Pre-Pro)", "01.02", 0x00000002, 0x02000000, 0x02000001),
+            ("CUSA00129", "Assassin's Creed Unity (SDK 2.50 - 900p)", "01.05", 0x00000002, 0x02500000, 0x02500001),
+            ("CUSA00900", "Bloodborne (SDK 3.50 - Pre-Pro)", "01.09", 0x00000002, 0x03500000, 0x03500001),
+            ("CUSA00207", "The Order: 1886 (SDK 2.00 - 800p)", "01.02", 0x00000002, 0x02000000, 0x02000001),
             ("CUSA00419", "Grand Theft Auto V (SDK 4.50)", "01.48", 0x00010002, 0x04500000, 0x04500001),
             ("CUSA07408", "God of War (Parche Pro Nativo)", "01.33", 0x02810002, 0x05500000, 0x05500001),
         ]
@@ -679,7 +907,7 @@ class NeoEnablerApp:
             sfo.save(sfo_path)
 
             eboot_path = str(demo_dir / f"{tid}_eboot.bin")
-            eboot_bytes = create_sample_fself_eboot(sdk_version=eboot_sdk)
+            eboot_bytes = create_sample_fself_eboot(sdk_version=eboot_sdk, res_width=1600, res_height=900)
             Path(eboot_path).write_bytes(eboot_bytes)
             analysis = analyze_eboot_bytes(eboot_bytes)
 
@@ -699,7 +927,7 @@ class NeoEnablerApp:
 
         self._refresh_table()
         self.log(
-            f"Cargados {len(samples)} juegos de prueba (incluyendo param.sfo + eboot.bin con SDK < 4.00) en {demo_dir}."
+            f"Cargados {len(samples)} juegos demo (param.sfo + eboot.bin con SDK < 4.00 y resolución 900p) en {demo_dir}."
         )
 
     def _get_selected_games(self) -> List[InstalledGame]:
@@ -758,6 +986,26 @@ class NeoEnablerApp:
         threading.Thread(target=worker, daemon=True).start()
 
 
+def _parse_wh(res_str: str) -> Tuple[int, int]:
+    """Parses '1440p', '1080p', '1620p', '2160p', or '2560x1440' into (width, height)."""
+    s = res_str.strip().lower()
+    presets = {
+        "720p": (1280, 720),
+        "900p": (1600, 900),
+        "1080p": (1920, 1080),
+        "1440p": (2560, 1440),
+        "1620p": (2880, 1620),
+        "2160p": (3840, 2160),
+        "4k": (3840, 2160),
+    }
+    if s in presets:
+        return presets[s]
+    if "x" in s:
+        parts = s.split("x", 1)
+        return int(parts[0]), int(parts[1])
+    raise ValueError(f"Formato de resolución no reconocido: {res_str} (usa ej. 1440p o 2560x1440)")
+
+
 def run_cli(args: argparse.Namespace) -> int:
     if args.eboot:
         epath = Path(args.eboot).resolve()
@@ -777,13 +1025,15 @@ def run_cli(args: argparse.Namespace) -> int:
                 bak.write_bytes(raw)
             patched, new_a = patch_eboot_sdk_version(raw, NEO_COMPAT_SDK_VERSION)
             epath.write_bytes(patched)
-            print(f"[OK] OrbisProcParam ('ORBI') sdk_version actualizado a {format_sdk_version(new_a.primary_sdk_version or 0)}")
+            print(
+                f"[OK] OrbisProcParam ('ORBI') sdk_version actualizado a {format_sdk_version(new_a.primary_sdk_version or 0)}"
+            )
         elif args.restore:
             bak = Path(f"{epath}.bak")
             if bak.exists():
                 epath.write_bytes(bak.read_bytes())
                 print(f"[OK] Restaurado eboot original desde {bak}")
-        if not args.file:
+        if not args.file and not args.target_res:
             return 0
 
     if args.file:
@@ -819,10 +1069,29 @@ def run_cli(args: argparse.Namespace) -> int:
                 sync_app_db=False,
                 log_cb=print,
             )
-            return 0 if ok else 1
+            if not ok:
+                return 1
         elif args.restore:
             ok, _ = client.restore_original_backup(game, sync_app_db=False, log_cb=print)
             return 0 if ok else 1
+
+        if args.target_res:
+            src_w, src_h = _parse_wh(args.source_res)
+            tgt_w, tgt_h = _parse_wh(args.target_res)
+            matches: List[ResolutionMatch] = []
+            if game.local_eboot_path and Path(game.local_eboot_path).exists():
+                matches = scan_eboot_for_resolutions(Path(game.local_eboot_path).read_bytes(), src_w, src_h)
+            entries = generate_resolution_patch_entries(
+                title_id=game.title_id,
+                title=game.title,
+                app_ver=game.app_ver,
+                matches=matches,
+                target_width=tgt_w,
+                target_height=tgt_h,
+                include_curated=True,
+            )
+            xml_str = build_goldhen_xml(game.title_id, entries)
+            client.deploy_goldhen_xml_patch(game.title_id, xml_str, log_cb=print)
         return 0
 
     if args.ftp_host:
@@ -841,10 +1110,26 @@ def run_cli(args: argparse.Namespace) -> int:
                     patch_old_sdk=not args.no_sdk_patch,
                     log_cb=print,
                 )
-                return 0 if ok else 1
+                if not ok:
+                    return 1
             elif args.restore:
                 ok, _ = client.restore_original_backup(target, log_cb=print)
                 return 0 if ok else 1
+
+            if args.target_res:
+                src_w, src_h = _parse_wh(args.source_res)
+                tgt_w, tgt_h = _parse_wh(args.target_res)
+                entries = generate_resolution_patch_entries(
+                    title_id=target.title_id,
+                    title=target.title,
+                    app_ver=target.app_ver,
+                    matches=[],
+                    target_width=tgt_w,
+                    target_height=tgt_h,
+                    include_curated=True,
+                )
+                xml_str = build_goldhen_xml(target.title_id, entries)
+                client.deploy_goldhen_xml_patch(target.title_id, xml_str, log_cb=print)
         client.disconnect()
         return 0
 
@@ -853,14 +1138,16 @@ def run_cli(args: argparse.Namespace) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="NEOENABLER v2.0 - Inyector de Modo Neo (PS4 Pro) para juegos con SDK Antiguo (< 4.00) en GoldHEN"
+        description="NEOENABLER v2.5 - Inyector de Modo Neo + Fix SDK Antiguo + Escalador de Resolución para GoldHEN"
     )
     parser.add_argument("--file", "-f", help="Ruta a un archivo param.sfo local para inspeccionar o parchear")
-    parser.add_argument("--eboot", "-e", help="Ruta a un archivo eboot.bin (FSELF/ELF) para elevar su ORBI sdk_version a 4.50")
+    parser.add_argument("--eboot", "-e", help="Ruta a un archivo eboot.bin (FSELF/ELF) para elevar SDK o escanear resolución")
     parser.add_argument("--ftp-host", help="IP de la PS4 con GoldHEN FTP activo")
     parser.add_argument("--ftp-port", type=int, default=2121, help="Puerto FTP de GoldHEN (por defecto: 2121)")
     parser.add_argument("--title-id", help="Title ID (ej. CUSA00552) a modificar por FTP")
     parser.add_argument("--no-sdk-patch", action="store_true", help="No elevar automáticamente SDKs antiguos (< 4.00)")
+    parser.add_argument("--source-res", default="900p", help="Resolución base original para escaneo (ej. 900p, 1080p)")
+    parser.add_argument("--target-res", help="Generar parche XML de resolución para GoldHEN (ej. 1080p, 1440p, 1620p, 4k)")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--enable", action="store_true", help="Inyectar Modo Neo + Fix de SDK Antiguo")
     group.add_argument("--disable", action="store_true", help="Desactivar Modo Neo")

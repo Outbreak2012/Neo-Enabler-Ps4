@@ -269,10 +269,15 @@ def patch_eboot_sdk_version(
     return updated_bytes, analyze_eboot_bytes(updated_bytes)
 
 
-def create_sample_fself_eboot(sdk_version: int = 0x02500001) -> bytes:
+def create_sample_fself_eboot(
+    sdk_version: int = 0x02500001,
+    res_width: int = 1600,
+    res_height: int = 900,
+) -> bytes:
     """
-    Creates a realistic mock FSELF (Fake Signed SELF) eboot.bin containing an embedded ELF64 header
-    and a valid OrbisProcParam ('ORBI') block for testing old-SDK Neo Mode injection.
+    Creates a realistic mock FSELF (Fake Signed SELF) eboot.bin containing an embedded ELF64 header,
+    a valid OrbisProcParam ('ORBI') block, and sample x86_64 framebuffer initialization instructions
+    (`MOV ECX, res_width; MOV EDX, res_height`) for testing old-SDK Neo Mode + Resolution upgrading.
     """
     # 1. 32-byte SELF header (magic 0x1D3D154F, 1 segment entry)
     self_hdr = struct.pack(
@@ -339,4 +344,13 @@ def create_sample_fself_eboot(sdk_version: int = 0x02500001) -> bytes:
         + b"\x00" * 40
     )
 
-    return prefix + padding + proc_param
+    # 5. Simulated x86_64 framebuffer setup instructions at offset 0x140:
+    # B9 <width_u32> (MOV ECX, width) + BA <height_u32> (MOV EDX, height)
+    code_block = (
+        b"\x48\x89\xe5"
+        + b"\xb9" + struct.pack("<I", res_width)
+        + b"\xba" + struct.pack("<I", res_height)
+        + b"\x90" * 20
+    )
+
+    return prefix + padding + proc_param + code_block

@@ -18,6 +18,12 @@ from eboot_patcher import (
     patch_eboot_sdk_version,
 )
 from ps4_ftp import BackupManager, GoldHenFtpClient, InstalledGame
+from resolution_patcher import (
+    build_goldhen_xml,
+    generate_resolution_patch_entries,
+    patch_eboot_resolution_inplace,
+    scan_eboot_for_resolutions,
+)
 from sfo_parser import NEO_MODE_BIT, SfoFile, create_sample_sfo
 
 
@@ -123,6 +129,34 @@ class TestNeoEnabler(unittest.TestCase):
 
             restored_eboot_analysis = analyze_eboot_bytes(eboot_path.read_bytes())
             self.assertEqual(restored_eboot_analysis.primary_sdk_version, 0x02000001)
+
+    def test_resolution_scanner_and_goldhen_xml_generator(self) -> None:
+        # Create a mock 900p (1600x900) FSELF eboot.bin
+        raw_eboot = create_sample_fself_eboot(sdk_version=0x02500001, res_width=1600, res_height=900)
+        matches = scan_eboot_for_resolutions(raw_eboot, source_width=1600, source_height=900)
+        self.assertGreaterEqual(len(matches), 1)
+        self.assertEqual(matches[0].original_width, 1600)
+        self.assertEqual(matches[0].original_height, 900)
+
+        # Generate GoldHEN XML upgrading 1600x900 -> 2560x1440 (1440p) + curated patches
+        entries = generate_resolution_patch_entries(
+            title_id="CUSA00129",
+            title="Assassin's Creed Unity",
+            app_ver="01.05",
+            matches=matches,
+            target_width=2560,
+            target_height=1440,
+            include_curated=True,
+        )
+        xml_text = build_goldhen_xml("CUSA00129", entries)
+        self.assertIn("<ID>CUSA00129</ID>", xml_text)
+        self.assertIn("0x00000a00", xml_text)  # 2560 in hex
+        self.assertIn("0x000005a0", xml_text)  # 1440 in hex
+
+        # Verify direct in-place eboot resolution patching
+        patched_eb = patch_eboot_resolution_inplace(raw_eboot, matches, 2560, 1440)
+        new_matches = scan_eboot_for_resolutions(patched_eb, source_width=2560, source_height=1440)
+        self.assertEqual(len(new_matches), len(matches))
 
 
 if __name__ == "__main__":

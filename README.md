@@ -33,7 +33,10 @@ En una PS4 Pro, cuando ejecutas un juego sin parche Pro:
    * Puedes revertir cualquier juego a su estado original con un solo clic en **"⏪ Restaurar Original"**.
 4. **Sincronización con `app.db` (`tbl_appinfo`):**
    * Actualiza opcionalmente `ATTRIBUTE` y `SYSTEM_VER` en `/system_data/priv/mms/app.db` (haciendo backup previo de `app.db`) para que el sistema operativo de la PS4 aplique el cambio sin necesidad de reinstalar el FPKG.
-5. **Modo Local / Offline:**
+5. **Escalador de Resolución (1080p / 1440p / 1620p / 4K) & 60 FPS para GoldHEN (`resolution_patcher.py`):**
+   * Incluye perfiles verificados de aumento de resolución y 60 FPS para clásicos sin parche Pro (*Bloodborne*, *Driveclub*, *The Order: 1886*, *Assassin's Creed Unity*).
+   * Incluye un **Escáner Heurístico Universal de `eboot.bin`** que localiza las instrucciones `MOV` x86_64 donde el juego inicializa el ancho y alto del framebuffer (`720p`, `900p`, `1080p`) y genera o sube por FTP el parche `/data/GoldHEN/patches/xml/<CUSAXXXXX>.xml` (o parcha el `eboot.bin` directamente).
+6. **Modo Local / Offline:**
    * Puedes abrir y parchear cualquier archivo `param.sfo` y `eboot.bin` sueltos en tu PC antes de empaquetar un FPKG.
 
 ---

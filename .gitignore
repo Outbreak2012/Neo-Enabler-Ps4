@@ -6,6 +6,7 @@ __pycache__/
 # User backups and demo generated files
 backups/
 demo_sfo/
+goldhen_patches_xml/
 *.bak
 
 # Build artifacts for GoldHEN plugin

@@ -715,3 +715,61 @@ class GoldHenFtpClient:
                 os.remove(tmp_path)
             except OSError:
                 pass
+
+    def ensure_remote_dir(self, remote_dir: str) -> None:
+        if not self.ftp:
+            return
+        parts = [p for p in remote_dir.strip("/").split("/") if p]
+        curr = ""
+        for p in parts:
+            curr += f"/{p}"
+            try:
+                self.ftp.mkd(curr)
+            except Exception:
+                pass
+
+    def deploy_goldhen_xml_patch(
+        self,
+        title_id: str,
+        xml_content: str,
+        local_save_dir: Optional[Path] = None,
+        log_cb: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[bool, str]:
+        """
+        Saves the generated GoldHEN resolution/60FPS XML patch (`<CUSAXXXXX>.xml`) locally
+        and, if connected via FTP, uploads it directly to `/data/GoldHEN/patches/xml/<CUSAXXXXX>.xml`.
+        """
+        def log(msg: str) -> None:
+            if log_cb:
+                log_cb(msg)
+
+        tid_upper = title_id.upper()
+        xml_bytes = xml_content.encode("utf-8")
+
+        out_dir = local_save_dir or (self.backup_manager.backups_root.parent / "goldhen_patches_xml")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        local_xml_path = out_dir / f"{tid_upper}.xml"
+        local_xml_path.write_bytes(xml_bytes)
+        log(f"  [XML] Parche de Resolución/60FPS guardado en PC: {local_xml_path}")
+
+        if self.ftp and self.is_connected:
+            self.ensure_remote_dir(GOLDHEN_PATCHES_XML_DIR)
+            remote_xml_path = f"{GOLDHEN_PATCHES_XML_DIR}/{tid_upper}.xml"
+            if self.upload_bytes(remote_xml_path, xml_bytes):
+                msg = (
+                    f"Parche XML subido a PS4 ({remote_xml_path}) y guardado en {local_xml_path}. "
+                    "Actívalo desde GoldHEN Cheat/Patch Menu al iniciar el juego."
+                )
+                log(f"  [OK] {msg}")
+                return True, msg
+            else:
+                msg = f"Guardado localmente en {local_xml_path}, pero falló la subida FTP a {remote_xml_path}."
+                log(f"  [!] {msg}")
+                return False, msg
+
+        msg = (
+            f"Parche XML generado en: {local_xml_path} "
+            f"(Cópialo a {GOLDHEN_PATCHES_XML_DIR}/{tid_upper}.xml en tu PS4 o conecta el FTP)."
+        )
+        log(f"  [OK] {msg}")
+        return True, msg

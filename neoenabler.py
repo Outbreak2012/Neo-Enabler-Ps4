@@ -26,10 +26,14 @@ from resolution_patcher import (
     CURATED_GAME_PATCHES,
     SOURCE_RESOLUTIONS,
     TARGET_RESOLUTIONS,
+    FramerateMatch,
     ResolutionMatch,
     build_goldhen_xml,
+    generate_framerate_patch_entry,
     generate_resolution_patch_entries,
+    patch_eboot_framerate_inplace,
     patch_eboot_resolution_inplace,
+    scan_eboot_for_framerate_lock,
     scan_eboot_for_resolutions,
 )
 from sfo_parser import NEO_MODE_BIT, SfoFile, create_sample_sfo
@@ -614,18 +618,27 @@ class NeoEnablerApp:
         row2 = ttk.Frame(ctrl_frame, style="Card.TFrame")
         row2.pack(fill=tk.X)
 
+        unlock_60fps_var = tk.BooleanVar(value=True)
         include_curated_var = tk.BooleanVar(value=True)
         patch_eboot_direct_var = tk.BooleanVar(value=False)
 
         ttk.Checkbutton(
             row2,
-            text="Incluir perfil verificado (Resolución + 60 FPS) si existe",
-            variable=include_curated_var,
-        ).pack(side=tk.LEFT, padx=(0, 16))
+            text="⚡ Liberar Framerate (60 FPS FlipRate Unlocker)",
+            variable=unlock_60fps_var,
+            command=lambda: refresh_preview(),
+        ).pack(side=tk.LEFT, padx=(0, 12))
 
         ttk.Checkbutton(
             row2,
-            text="Parchear también el eboot.bin directamente en disco",
+            text="Incluir perfil verificado",
+            variable=include_curated_var,
+            command=lambda: refresh_preview(),
+        ).pack(side=tk.LEFT, padx=(0, 12))
+
+        ttk.Checkbutton(
+            row2,
+            text="Parchear también eboot.bin directo",
             variable=patch_eboot_direct_var,
         ).pack(side=tk.LEFT)
 
@@ -649,10 +662,12 @@ class NeoEnablerApp:
         xml_preview.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
         discovered_matches: List[ResolutionMatch] = []
+        discovered_fps_matches: List[FramerateMatch] = []
 
         def refresh_preview() -> None:
-            nonlocal discovered_matches
+            nonlocal discovered_matches, discovered_fps_matches
             discovered_matches = []
+            discovered_fps_matches = []
             src_w, src_h = SOURCE_RESOLUTIONS.get(src_res_var.get(), (1600, 900))
             tgt_w, tgt_h = TARGET_RESOLUTIONS.get(tgt_res_var.get(), (2560, 1440))
 
@@ -660,6 +675,8 @@ class NeoEnablerApp:
             if game.local_eboot_path and Path(game.local_eboot_path).exists():
                 raw_eb = Path(game.local_eboot_path).read_bytes()
                 discovered_matches = scan_eboot_for_resolutions(raw_eb, src_w, src_h)
+                if unlock_60fps_var.get():
+                    discovered_fps_matches = scan_eboot_for_framerate_lock(raw_eb)
 
             entries = generate_resolution_patch_entries(
                 title_id=game.title_id,
@@ -670,6 +687,15 @@ class NeoEnablerApp:
                 target_height=tgt_h,
                 include_curated=include_curated_var.get(),
             )
+            if unlock_60fps_var.get() and discovered_fps_matches:
+                fps_entry = generate_framerate_patch_entry(
+                    title=game.title,
+                    app_ver=game.app_ver,
+                    fps_matches=discovered_fps_matches,
+                )
+                if fps_entry is not None:
+                    entries.append(fps_entry)
+
             xml_str = build_goldhen_xml(game.title_id, entries)
             xml_preview.delete("1.0", tk.END)
             xml_preview.insert(tk.END, xml_str)
@@ -683,29 +709,37 @@ class NeoEnablerApp:
         def on_scan_custom_eboot() -> None:
             p = filedialog.askopenfilename(
                 parent=win,
-                title="Seleccionar eboot.bin para escanear su framebuffer de resolución",
+                title="Seleccionar eboot.bin para escanear su framebuffer y límite de 30 FPS",
                 filetypes=[("eboot.bin / ELF", "*.bin *.elf"), ("Todos", "*.*")],
             )
             if p:
                 game.local_eboot_path = p
                 refresh_preview()
-                self.log(f"Escaneado eboot.bin para resolución: {p} ({len(discovered_matches)} coincidencias x86_64)")
+                self.log(
+                    f"Escaneado eboot.bin: {p} ({len(discovered_matches)} matches de resolución, "
+                    f"{len(discovered_fps_matches)} bloqueos de 30 FPS detectados)"
+                )
 
         def on_apply_and_deploy() -> None:
             xml_content = xml_preview.get("1.0", tk.END).strip() + "\n"
             tgt_w, tgt_h = TARGET_RESOLUTIONS.get(tgt_res_var.get(), (2560, 1440))
 
             # Optionally patch eboot.bin directly if requested and matches were found
-            if patch_eboot_direct_var.get() and game.local_eboot_path and discovered_matches:
+            if patch_eboot_direct_var.get() and game.local_eboot_path and (discovered_matches or discovered_fps_matches):
                 ep = Path(game.local_eboot_path)
                 raw_eb = ep.read_bytes()
                 bak = Path(f"{ep}.res.bak")
                 if not bak.exists():
                     bak.write_bytes(raw_eb)
-                patched_eb = patch_eboot_resolution_inplace(raw_eb, discovered_matches, tgt_w, tgt_h)
+                patched_eb = raw_eb
+                if discovered_matches:
+                    patched_eb = patch_eboot_resolution_inplace(patched_eb, discovered_matches, tgt_w, tgt_h)
+                if unlock_60fps_var.get() and discovered_fps_matches:
+                    patched_eb = patch_eboot_framerate_inplace(patched_eb, discovered_fps_matches)
                 ep.write_bytes(patched_eb)
                 self.log(
-                    f"  [OK] eboot.bin parcheado directamente a {tgt_w}x{tgt_h} ({len(discovered_matches)} instrucciones)."
+                    f"  [OK] eboot.bin parcheado directamente ({tgt_w}x{tgt_h}"
+                    f"{' + 60 FPS FlipRate=0' if (unlock_60fps_var.get() and discovered_fps_matches) else ''})."
                 )
 
             ok, msg = self.ftp_client.deploy_goldhen_xml_patch(
@@ -1075,12 +1109,17 @@ def run_cli(args: argparse.Namespace) -> int:
             ok, _ = client.restore_original_backup(game, sync_app_db=False, log_cb=print)
             return 0 if ok else 1
 
-        if args.target_res:
+        if args.target_res or args.unlock_fps:
             src_w, src_h = _parse_wh(args.source_res)
-            tgt_w, tgt_h = _parse_wh(args.target_res)
+            tgt_w, tgt_h = _parse_wh(args.target_res) if args.target_res else (src_w, src_h)
             matches: List[ResolutionMatch] = []
+            fps_matches: List[FramerateMatch] = []
             if game.local_eboot_path and Path(game.local_eboot_path).exists():
-                matches = scan_eboot_for_resolutions(Path(game.local_eboot_path).read_bytes(), src_w, src_h)
+                raw_eb = Path(game.local_eboot_path).read_bytes()
+                if args.target_res:
+                    matches = scan_eboot_for_resolutions(raw_eb, src_w, src_h)
+                if args.unlock_fps:
+                    fps_matches = scan_eboot_for_framerate_lock(raw_eb)
             entries = generate_resolution_patch_entries(
                 title_id=game.title_id,
                 title=game.title,
@@ -1090,6 +1129,10 @@ def run_cli(args: argparse.Namespace) -> int:
                 target_height=tgt_h,
                 include_curated=True,
             )
+            if args.unlock_fps and fps_matches:
+                fps_entry = generate_framerate_patch_entry(game.title, game.app_ver, fps_matches)
+                if fps_entry:
+                    entries.append(fps_entry)
             xml_str = build_goldhen_xml(game.title_id, entries)
             client.deploy_goldhen_xml_patch(game.title_id, xml_str, log_cb=print)
         return 0
@@ -1148,6 +1191,7 @@ def main() -> None:
     parser.add_argument("--no-sdk-patch", action="store_true", help="No elevar automáticamente SDKs antiguos (< 4.00)")
     parser.add_argument("--source-res", default="900p", help="Resolución base original para escaneo (ej. 900p, 1080p)")
     parser.add_argument("--target-res", help="Generar parche XML de resolución para GoldHEN (ej. 1080p, 1440p, 1620p, 4k)")
+    parser.add_argument("--unlock-fps", action="store_true", help="Liberar el límite de 30 FPS a 60 FPS (sceVideoOutSetFlipRate = 0)")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--enable", action="store_true", help="Inyectar Modo Neo + Fix de SDK Antiguo")
     group.add_argument("--disable", action="store_true", help="Desactivar Modo Neo")

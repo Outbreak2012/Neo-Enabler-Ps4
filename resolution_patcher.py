@@ -69,6 +69,16 @@ class ResolutionMatch:
     pattern_description: str
 
 
+@dataclass
+class FramerateMatch:
+    """Represents a discovered x86_64 30 FPS fliprate lock (MOV ESI, 1 or 2 before sceVideoOutSetFlipRate)."""
+    file_offset: int
+    vaddr: int
+    original_bytes_hex: str
+    patched_bytes_hex: str
+    pattern_description: str
+
+
 # Curated database of verified GoldHEN XML patches for iconic unpatched / old-SDK games
 CURATED_GAME_PATCHES: Dict[str, List[GoldHenPatchEntry]] = {
     # Bloodborne (US / EU / GOTY)
@@ -379,4 +389,86 @@ def patch_eboot_resolution_inplace(
     for m in matches:
         buf[m.width_file_offset : m.width_file_offset + 4] = w_packed
         buf[m.height_file_offset : m.height_file_offset + 4] = h_packed
+    return bytes(buf)
+
+
+def scan_eboot_for_framerate_lock(
+    eboot_bytes: bytes,
+    base_vaddr: int = 0x00400000,
+) -> List[FramerateMatch]:
+    """
+    Scans a PS4 executable (`eboot.bin`) for x86_64 `sceVideoOutSetFlipRate(handle, rate)`
+    setup instructions that lock the game to 30 FPS (`rate = 1` or `rate = 2` in `ESI`):
+    - `BE 01 00 00 00` (`MOV ESI, 1`) followed within 16 bytes by `E8 <rel32>` (`CALL`) or `FF 15 <rel32>`
+    - `BE 02 00 00 00` (`MOV ESI, 2`) followed within 16 bytes by `E8 <rel32>` (`CALL`) or `FF 15 <rel32>`
+    Patches `MOV ESI, 1/2` -> `31 F6 90 90 90` (`XOR ESI, ESI; NOP; NOP; NOP` -> rate = 0 = 60 FPS unlocked).
+    """
+    matches: List[FramerateMatch] = []
+    data_len = len(eboot_bytes)
+
+    for rate_val, label in [(1, "30 FPS FlipRate=1"), (2, "30/20 FPS FlipRate=2")]:
+        needle = b"\xbe" + struct.pack("<I", rate_val)  # BE 01 00 00 00 or BE 02 00 00 00
+        pos = 0
+        while True:
+            idx = eboot_bytes.find(needle, pos)
+            if idx == -1 or idx + 10 > data_len:
+                break
+            pos = idx + 1
+
+            # Check if a CALL instruction (0xE8 rel32 or 0xFF 0x15 rip-relative) follows within 16 bytes
+            window = eboot_bytes[idx + 5 : min(data_len, idx + 21)]
+            has_call = (b"\xe8" in window) or (b"\xff\x15" in window)
+            if not has_call:
+                continue
+
+            matches.append(
+                FramerateMatch(
+                    file_offset=idx,
+                    vaddr=base_vaddr + idx,
+                    original_bytes_hex=needle.hex(),
+                    patched_bytes_hex="31f6909090",  # xor esi, esi (rate=0 -> 60 FPS); 3x nop
+                    pattern_description=f"x86_64 MOV ESI, {rate_val} ({label}) -> XOR ESI, ESI (60 FPS)",
+                )
+            )
+
+    return matches
+
+
+def generate_framerate_patch_entry(
+    title: str,
+    app_ver: str,
+    fps_matches: List[FramerateMatch],
+) -> Optional[GoldHenPatchEntry]:
+    """Generates a GoldHEN XML patch entry unlocking 60 FPS from discovered `sceVideoOutSetFlipRate` matches."""
+    if not fps_matches:
+        return None
+    lines: List[XmlPatchLine] = []
+    for idx, m in enumerate(fps_matches, 1):
+        lines.append(
+            XmlPatchLine(
+                line_type="bytes",
+                address=f"0x{m.vaddr:08x}",
+                value=m.patched_bytes_hex,
+                comment=f"60 FPS Unlock #{idx}: {m.pattern_description}",
+            )
+        )
+    return GoldHenPatchEntry(
+        title=title,
+        name="NEOENABLER 60 FPS Unlock (sceVideoOutSetFlipRate = 0)",
+        note="Fuerza FlipRate = 0 (60 Hz) para liberar el límite de 30 FPS aprovechando el Modo Neo.",
+        author="NEOENABLER Auto-Scanner",
+        app_ver=app_ver,
+        lines=lines,
+    )
+
+
+def patch_eboot_framerate_inplace(
+    eboot_bytes: bytes,
+    fps_matches: List[FramerateMatch],
+) -> bytes:
+    """Directly patches `MOV ESI, 1/2` to `XOR ESI, ESI; NOP; NOP; NOP` (`31 F6 90 90 90`) in eboot.bin."""
+    buf = bytearray(eboot_bytes)
+    replacement = bytes.fromhex("31f6909090")
+    for m in fps_matches:
+        buf[m.file_offset : m.file_offset + 5] = replacement
     return bytes(buf)

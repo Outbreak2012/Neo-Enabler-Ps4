@@ -20,8 +20,11 @@ from eboot_patcher import (
 from ps4_ftp import BackupManager, GoldHenFtpClient, InstalledGame
 from resolution_patcher import (
     build_goldhen_xml,
+    generate_framerate_patch_entry,
     generate_resolution_patch_entries,
+    patch_eboot_framerate_inplace,
     patch_eboot_resolution_inplace,
+    scan_eboot_for_framerate_lock,
     scan_eboot_for_resolutions,
 )
 from sfo_parser import NEO_MODE_BIT, SfoFile, create_sample_sfo
@@ -157,6 +160,16 @@ class TestNeoEnabler(unittest.TestCase):
         patched_eb = patch_eboot_resolution_inplace(raw_eboot, matches, 2560, 1440)
         new_matches = scan_eboot_for_resolutions(patched_eb, source_width=2560, source_height=1440)
         self.assertEqual(len(new_matches), len(matches))
+
+        # Verify 30 FPS -> 60 FPS FlipRate Unlocker scanner & in-place patcher
+        fps_matches = scan_eboot_for_framerate_lock(raw_eboot)
+        self.assertGreaterEqual(len(fps_matches), 1)
+        fps_entry = generate_framerate_patch_entry("Assassin's Creed Unity", "01.05", fps_matches)
+        self.assertIsNotNone(fps_entry)
+        self.assertEqual(fps_entry.lines[0].value, "31f6909090")
+
+        patched_fps_eb = patch_eboot_framerate_inplace(raw_eboot, fps_matches)
+        self.assertEqual(len(scan_eboot_for_framerate_lock(patched_fps_eb)), 0)
 
 
 if __name__ == "__main__":

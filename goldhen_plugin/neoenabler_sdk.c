@@ -34,11 +34,13 @@ typedef struct OrbisProcParam {
     uint64_t sdk_version;   /* 0x10: Compiled SDK version */
 } OrbisProcParam;
 
-/* Kernel function pointers */
+/* Kernel & VideoOut function pointers */
 typedef int (*sceKernelGetCompiledSdkVersion_t)(int *ver);
 typedef OrbisProcParam* (*sceKernelGetProcParam_t)(void);
+typedef int (*sceVideoOutSetFlipRate_t)(int32_t handle, int32_t rate);
 
 static Detour Detour_sceKernelGetCompiledSdkVersion;
+static Detour Detour_sceVideoOutSetFlipRate;
 static uint32_t g_original_sdk_version = 0;
 
 /*
@@ -56,6 +58,23 @@ static int Hook_sceKernelGetCompiledSdkVersion(int *ver) {
         }
     }
     return ret;
+}
+
+/*
+ * Hook for sceVideoOutSetFlipRate:
+ * Unlocks 30 FPS (rate=1 or rate=2) caps in PS4 games by forcing rate=0 (60 Hz / 60 FPS unlocked).
+ * Note: In Orbis OS sceVideoOutSetFlipRate(handle, rate):
+ *   rate = 0 -> 60 FPS (flip every VBlank)
+ *   rate = 1 -> 30 FPS (flip every 2nd VBlank)
+ *   rate = 2 -> 20 FPS (flip every 3rd VBlank)
+ */
+static int Hook_sceVideoOutSetFlipRate(int32_t handle, int32_t rate) {
+    if (rate > 0) {
+        klog("[NEOENABLER] Framerate Unlocker: intercepting sceVideoOutSetFlipRate(handle=%d, rate=%d -> 0 for 60 FPS)\n",
+             handle, rate);
+        rate = 0;
+    }
+    return ((sceVideoOutSetFlipRate_t)Detour_sceVideoOutSetFlipRate.Original)(handle, rate);
 }
 
 /*
@@ -110,11 +129,24 @@ int module_start(size_t argc, const void *args) {
         klog("[NEOENABLER] Warning: Could not resolve sceKernelGetCompiledSdkVersion\n");
     }
 
+    /* 3. Hook sceVideoOutSetFlipRate in libSceVideoOut to unlock 60 FPS */
+    void *fliprate_fn = NULL;
+    int video_mod = sys_dynlib_load_prx("libSceVideoOut.sprx");
+    if (video_mod >= 0) {
+        sys_dynlib_dlsym(video_mod, "sceVideoOutSetFlipRate", &fliprate_fn);
+    }
+    if (fliprate_fn != NULL) {
+        Detour_Construct(&Detour_sceVideoOutSetFlipRate, DetourMode_x64);
+        Detour_DetourFunction(&Detour_sceVideoOutSetFlipRate, (uint64_t)fliprate_fn, (void *)Hook_sceVideoOutSetFlipRate);
+        klog("[NEOENABLER] Hooked sceVideoOutSetFlipRate at %p (60 FPS Framerate Unlocker Active)\n", fliprate_fn);
+    }
+
     return 0;
 }
 
 int module_stop(size_t argc, const void *args) {
     Detour_Destroy(&Detour_sceKernelGetCompiledSdkVersion);
+    Detour_Destroy(&Detour_sceVideoOutSetFlipRate);
     klog("[NEOENABLER] Plugin unloaded.\n");
     return 0;
 }

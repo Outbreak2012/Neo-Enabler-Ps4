@@ -344,13 +344,16 @@ def create_sample_fself_eboot(
         + b"\x00" * 40
     )
 
-    # 5. Simulated x86_64 framebuffer setup instructions at offset 0x140:
-    # B9 <width_u32> (MOV ECX, width) + BA <height_u32> (MOV EDX, height)
+    # 5. Simulated x86_64 framebuffer setup + 30 FPS fliprate lock instructions at offset 0x140:
+    # - B9 <width_u32> (MOV ECX, width) + BA <height_u32> (MOV EDX, height)
+    # - BE 02 00 00 00 (MOV ESI, 2 -> 30 FPS lock) + E8 10 00 00 00 (CALL sceVideoOutSetFlipRate)
     code_block = (
         b"\x48\x89\xe5"
         + b"\xb9" + struct.pack("<I", res_width)
         + b"\xba" + struct.pack("<I", res_height)
-        + b"\x90" * 20
+        + b"\xbe\x02\x00\x00\x00"
+        + b"\xe8\x10\x00\x00\x00"
+        + b"\x90" * 10
     )
 
     return prefix + padding + proc_param + code_block
